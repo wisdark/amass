@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,7 +54,7 @@ var Banner = `
 
 const (
 	// Version is used to display the current version of Amass.
-	Version = "2.9.13"
+	Version = "3.0.0"
 
 	// Author is used to display the founder of the amass package.
 	Author = "Jeff Foley - @jeff_foley"
@@ -532,7 +533,7 @@ func UpdateSummaryData(output *core.Output, tags map[string]int, asns map[int]*A
 }
 
 // PrintEnumerationSummary outputs the summary information utilized by the command-line tools.
-func PrintEnumerationSummary(total int, tags map[string]int, asns map[int]*ASNSummaryData) {
+func PrintEnumerationSummary(total int, tags map[string]int, asns map[int]*ASNSummaryData, demo bool) {
 	pad := func(num int, chr string) {
 		for i := 0; i < num; i++ {
 			b.Fprint(color.Error, chr)
@@ -568,12 +569,27 @@ func PrintEnumerationSummary(total int, tags map[string]int, asns map[int]*ASNSu
 	fmt.Fprintln(color.Error)
 	// Print the ASN and netblock information
 	for asn, data := range asns {
+		asnstr := strconv.Itoa(asn)
+		datastr := data.Name
+
+		if demo && asn > 0 {
+			asnstr = censorString(asnstr, 0, len(asnstr))
+			datastr = censorString(datastr, 0, len(datastr))
+		}
+
 		fmt.Fprintf(color.Error, "%s%s %s %s\n",
-			blue("ASN: "), yellow(strconv.Itoa(asn)), green("-"), green(data.Name))
+			blue("ASN: "), yellow(asnstr), green("-"), green(datastr))
 
 		for cidr, ips := range data.Netblocks {
-			countstr := fmt.Sprintf("\t%-4s", strconv.Itoa(ips))
-			cidrstr := fmt.Sprintf("\t%-18s", cidr)
+			countstr := strconv.Itoa(ips)
+			cidrstr := cidr
+
+			if demo {
+				cidrstr = censorNetBlock(cidrstr)
+			}
+
+			countstr = fmt.Sprintf("\t%-4s", countstr)
+			cidrstr = fmt.Sprintf("\t%-18s", cidrstr)
 
 			fmt.Fprintf(color.Error, "%s%s %s\n",
 				yellow(cidrstr), yellow(countstr), blue("Subdomain Name(s)"))
@@ -604,8 +620,34 @@ func PrintBanner() {
 	y.Fprintf(color.Error, "%s\n\n\n", desc)
 }
 
+func censorDomain(input string) string {
+	return censorString(input, strings.Index(input, "."), len(input))
+}
+
+func censorIP(input string) string {
+	return censorString(input, 0, strings.LastIndex(input, "."))
+}
+
+func censorNetBlock(input string) string {
+	return censorString(input, 0, strings.Index(input, "/"))
+}
+
+func censorString(input string, start, end int) string {
+	runes := []rune(input)
+	for i := start; i < end; i++ {
+		if runes[i] == '.' ||
+			runes[i] == '/' ||
+			runes[i] == '-' ||
+			runes[i] == ' ' {
+			continue
+		}
+		runes[i] = 'x'
+	}
+	return string(runes)
+}
+
 // OutputLineParts returns the parts of a line to be printed for a core.Output.
-func OutputLineParts(out *core.Output, src, addrs bool) (source, name, ips string) {
+func OutputLineParts(out *core.Output, src, addrs, demo bool) (source, name, ips string) {
 	if src {
 		source = fmt.Sprintf("%-18s", "["+out.Source+"] ")
 	}
@@ -614,12 +656,37 @@ func OutputLineParts(out *core.Output, src, addrs bool) (source, name, ips strin
 			if i != 0 {
 				ips += ","
 			}
-			ips += a.Address.String()
+			if demo {
+				ips += censorIP(a.Address.String())
+			} else {
+				ips += a.Address.String()
+			}
 		}
 		if ips == "" {
 			ips = "N/A"
 		}
 	}
 	name = out.Name
+	if demo {
+		name = censorDomain(name)
+	}
 	return
+}
+
+// DesiredAddrTypes removes undesired address types from the AddressInfo slice.
+func DesiredAddrTypes(addrs []core.AddressInfo, ipv4, ipv6 bool) []core.AddressInfo {
+	if !ipv4 && !ipv6 {
+		return addrs
+	}
+
+	var keep []core.AddressInfo
+	for _, addr := range addrs {
+		if utils.IsIPv4(addr.Address) && !ipv4 {
+			continue
+		} else if utils.IsIPv6(addr.Address) && !ipv6 {
+			continue
+		}
+		keep = append(keep, addr)
+	}
+	return keep
 }
