@@ -36,6 +36,8 @@ The OWASP Amass tool suite obtains subdomain names by scraping data sources, rec
 
 ## Documentation
 
+Use the [Installation Guide](https://github.com/OWASP/Amass/blob/master/doc/install.md) to get started.
+
 Go to the [User's Guide](https://github.com/OWASP/Amass/blob/master/doc/user_guide.md) for additional information.
 
 ## Community
@@ -68,6 +70,9 @@ This project improves thanks to all the people who contribute:
 
 ## Mentions
 
+* [Where You’ll Find Us: An Overview of SecurityTrails Integrations](https://securitytrails.com/blog/integrations-overview)
+* [Web tools, or where to start a pentester?](https://habr.com/en/company/dsec/blog/452836/)
+* [Tool for detailed DNS enumeration and creation of network infrastructure maps](https://www.gurudelainformatica.es/2019/05/herramienta-para-enumeracion-detallada.html)
 * [Top 7 Subdomain Scanner Tools: Find Subdomains in Seconds](https://securitytrails.com/blog/subdomain-scanner-find-subdomains)
 * [Cyber Talent Gap: How to Do More With Less](https://www.digitalshadows.com/blog-and-research/cyber-talent-gap-how-to-do-more-with-less/)
 * [My Recon Process — DNS Enumeration](https://medium.com/@noobhax/my-recon-process-dns-enumeration-d0e288f81a8a)
