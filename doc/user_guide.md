@@ -1,5 +1,5 @@
 
-# [![OWASP Logo](https://github.com/OWASP/Amass/blob/master/images/owasp_logo.png) OWASP Amass](https://www.owasp.org/index.php/OWASP_Amass_Project) - User's Guide
+# [![OWASP Logo](https://github.com/OWASP/Amass/blob/master/images/owasp_logo.png) OWASP Amass](https://www.owasp.org/index.php/OWASP_Amass_Project) - Users' Guide
 
 ![Network graph](https://github.com/OWASP/Amass/blob/master/images/network_06092018.png "Amass Network Mapping")
 
@@ -33,6 +33,14 @@ $ amass enum -src -brute -min-for-recursive 1 -d example.com
 [VirusTotal] ns.example.com
 ...
 ```
+
+Executing the tool via the Docker image:
+
+```bash
+docker run -v ~/amass:/amass/ caffix/amass:latest enum --list
+```
+
+The volume argument allows the Amass graph database to persist between executions and output files to be accessed on the host system.
 
 ## Command-line Usage Information
 
