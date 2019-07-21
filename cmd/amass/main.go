@@ -9,17 +9,17 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"path/filepath"
 
-	"github.com/OWASP/Amass/amass"
-	"github.com/OWASP/Amass/amass/core"
-	"github.com/OWASP/Amass/amass/handlers"
-	"github.com/OWASP/Amass/amass/sources"
+	"github.com/OWASP/Amass/config"
+	"github.com/OWASP/Amass/eventbus"
+	"github.com/OWASP/Amass/resolvers"
+	"github.com/OWASP/Amass/services/sources"
+	"github.com/OWASP/Amass/utils"
 	"github.com/fatih/color"
-	homedir "github.com/mitchellh/go-homedir"
 )
 
 const (
+	mainUsageMsg = "intel|enum|viz|track|db [options]"
 	exampleConfigFileURL = "https://github.com/OWASP/Amass/blob/master/examples/config.ini"
 	userGuideURL         = "https://github.com/OWASP/Amass/blob/master/doc/user_guide.md"
 )
@@ -38,53 +38,50 @@ var (
 )
 
 func commandUsage(msg string, cmdFlagSet *flag.FlagSet, errBuf *bytes.Buffer) {
-	amass.PrintBanner()
+	utils.PrintBanner()
 	g.Fprintf(color.Error, "Usage: %s %s\n\n", path.Base(os.Args[0]), msg)
 	cmdFlagSet.PrintDefaults()
 	g.Fprintln(color.Error, errBuf.String())
 
-	g.Fprintf(color.Error, "The user guide can be found here: \n%s\n\n", userGuideURL)
-	g.Fprintf(color.Error, "An example configuration file can be found here: \n%s\n\n", exampleConfigFileURL)
-}
-
-func main() {
-	var version, help1, help2 bool
-
-	defaultBuf := new(bytes.Buffer)
-	flag.CommandLine.SetOutput(defaultBuf)
-	flag.Usage = func() {
-		amass.PrintBanner()
-		g.Fprintf(color.Error, "Usage: %s intel|enum|viz|track|db [options]\n\n", path.Base(os.Args[0]))
-		flag.PrintDefaults()
-		g.Fprintln(color.Error, defaultBuf.String())
-
+	if msg == mainUsageMsg {
 		g.Fprintf(color.Error, "\nSubcommands: \n\n")
 		g.Fprintf(color.Error, "\t%-11s - Discover targets for enumerations\n", "amass intel")
 		g.Fprintf(color.Error, "\t%-11s - Perform enumerations and network mapping\n", "amass enum")
 		g.Fprintf(color.Error, "\t%-11s - Visualize enumeration results\n", "amass viz")
 		g.Fprintf(color.Error, "\t%-11s - Track differences between enumerations\n", "amass track")
 		g.Fprintf(color.Error, "\t%-11s - Manipulate the Amass graph database\n\n", "amass db")
-
-		g.Fprintf(color.Error, "The user guide can be found here: \n%s\n\n", userGuideURL)
-		g.Fprintf(color.Error, "An example configuration file can be found here: \n%s\n\n", exampleConfigFileURL)
 	}
 
-	flag.BoolVar(&help1, "h", false, "Show the program usage message")
-	flag.BoolVar(&help2, "help", false, "Show the program usage message")
-	flag.BoolVar(&version, "version", false, "Print the version number of this Amass binary")
+	g.Fprintf(color.Error, "The user's guide can be found here: \n%s\n\n", userGuideURL)
+	g.Fprintf(color.Error, "An example configuration file can be found here: \n%s\n\n", exampleConfigFileURL)
+}
+
+func main() {
+	var version, help1, help2 bool
+	mainFlagSet := flag.NewFlagSet("amass", flag.ContinueOnError)
+
+	defaultBuf := new(bytes.Buffer)
+	mainFlagSet.SetOutput(defaultBuf)
+
+	mainFlagSet.BoolVar(&help1, "h", false, "Show the program usage message")
+	mainFlagSet.BoolVar(&help2, "help", false, "Show the program usage message")
+	mainFlagSet.BoolVar(&version, "version", false, "Print the version number of this Amass binary")
 
 	if len(os.Args) < 2 {
-		flag.Usage()
+		commandUsage(mainUsageMsg, mainFlagSet, defaultBuf)
 		return
 	}
 
-	flag.Parse()
+	if err := mainFlagSet.Parse(os.Args[1:]); err != nil {
+		r.Fprintf(color.Error, "%v\n", err)
+		os.Exit(1)
+	}
 	if help1 || help2 {
-		flag.Usage()
+		commandUsage(mainUsageMsg, mainFlagSet, defaultBuf)
 		return
 	}
 	if version {
-		fmt.Fprintf(color.Error, "version %s\n", amass.Version)
+		fmt.Fprintf(color.Error, "%s\n", utils.Version)
 		return
 	}
 
@@ -100,43 +97,17 @@ func main() {
 	case "viz":
 		runVizCommand(os.Args[2:])
 	default:
-		flag.Usage()
+		commandUsage(mainUsageMsg, mainFlagSet, defaultBuf)
 		os.Exit(1)
 	}
 }
 
-func outputDirectory(dir string) string {
-	if dir == "" {
-		if path, err := homedir.Dir(); err == nil {
-			dir = filepath.Join(path, handlers.DefaultGraphDBDirectory)
-		}
-	}
-	return dir
-}
-
-func acquireConfig(dir, file string, config *core.Config) (string, bool) {
-	if file != "" {
-		if err := config.LoadSettings(file); err == nil {
-			return file, true
-		}
-	}
-	if dir = outputDirectory(dir); dir != "" {
-		if finfo, err := os.Stat(dir); !os.IsNotExist(err) && finfo.IsDir() {
-			file = filepath.Join(dir, "config.ini")
-			if err := config.LoadSettings(file); err == nil {
-				return file, true
-			}
-		}
-	}
-	return "", false
-}
-
 // GetAllSourceNames returns the names of all Amass data sources.
 func GetAllSourceNames() []string {
-	bus := core.NewEventBus()
+	bus := eventbus.NewEventBus()
 
 	var names []string
-	for _, src := range sources.GetAllSources(&core.Config{}, bus) {
+	for _, src := range sources.GetAllSources(&config.Config{}, bus, resolvers.NewResolverPool(nil)) {
 		names = append(names, src.String())
 	}
 	bus.Stop()
