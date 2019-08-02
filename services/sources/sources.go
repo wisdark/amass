@@ -14,6 +14,7 @@ import (
 	eb "github.com/OWASP/Amass/eventbus"
 	"github.com/OWASP/Amass/resolvers"
 	"github.com/OWASP/Amass/services"
+	"github.com/OWASP/Amass/stringset"
 	"github.com/OWASP/Amass/utils"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/geziyor/geziyor"
@@ -49,6 +50,7 @@ func GetAllSources(cfg *config.Config, bus *eb.EventBus, pool *resolvers.Resolve
 		NewEntrust(cfg, bus, pool),
 		NewExalead(cfg, bus, pool),
 		NewGoogle(cfg, bus, pool),
+		NewGoogleCT(cfg, bus, pool),
 		NewHackerOne(cfg, bus, pool),
 		NewHackerTarget(cfg, bus, pool),
 		NewIPv4Info(cfg, bus, pool),
@@ -102,14 +104,14 @@ func cleanName(name string) string {
 }
 
 func crawl(service services.Service, baseURL, baseDomain, subdomain, domain string) ([]string, error) {
-	var results []string
+	results := stringset.New()
 
 	maxCrawlSem.Acquire(1)
 	defer maxCrawlSem.Release(1)
 
 	re := service.Config().DomainRegex(domain)
 	if re == nil {
-		return results, fmt.Errorf("crawler error: Failed to obtain regex object for: %s", domain)
+		return results.Slice(), fmt.Errorf("crawler error: Failed to obtain regex object for: %s", domain)
 	}
 
 	start := fmt.Sprintf("%s/%s/%s", baseURL, strconv.Itoa(time.Now().Year()), subdomain)
@@ -127,12 +129,12 @@ func crawl(service services.Service, baseURL, baseDomain, subdomain, domain stri
 			r.HTMLDoc.Find("a").Each(func(i int, s *goquery.Selection) {
 				if href, ok := s.Attr("href"); ok {
 					if sub := re.FindString(r.JoinURL(href)); sub != "" {
-						results = utils.UniqueAppend(results, cleanName(sub))
+						results.Insert(cleanName(sub))
 					}
 				}
 			})
 		},
 	}).Start()
 
-	return results, nil
+	return results.Slice(), nil
 }
