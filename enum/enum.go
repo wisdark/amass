@@ -5,25 +5,24 @@ package enum
 
 import (
 	"errors"
-	"io/ioutil"
-	"log"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/OWASP/Amass/config"
 	eb "github.com/OWASP/Amass/eventbus"
 	"github.com/OWASP/Amass/graph"
+	"github.com/OWASP/Amass/queue"
 	"github.com/OWASP/Amass/requests"
 	"github.com/OWASP/Amass/resolvers"
 	"github.com/OWASP/Amass/services"
 	"github.com/OWASP/Amass/services/sources"
-	"github.com/OWASP/Amass/utils"
-	"github.com/google/uuid"
+	sf "github.com/OWASP/Amass/stringfilter"
 )
 
 // Enumeration is the object type used to execute a DNS enumeration with Amass.
 type Enumeration struct {
+	sync.Mutex
+
 	Config *config.Config
 	Bus    *eb.EventBus
 	Pool   *resolvers.ResolverPool
@@ -31,14 +30,12 @@ type Enumeration struct {
 	// Link graph that collects all the information gathered by the enumeration
 	Graph graph.DataHandler
 
-	// Names already known prior to the enumeration
-	ProvidedNames []string
-
 	// The channel that will receive the results
 	Output chan *requests.Output
 
 	// Broadcast channel that indicates no further writes to the output channel
-	Done chan struct{}
+	done              chan struct{}
+	doneAlreadyClosed bool
 
 	dataSources []services.Service
 	bruteSrv    services.Service
@@ -47,8 +44,8 @@ type Enumeration struct {
 	pause  chan struct{}
 	resume chan struct{}
 
-	filter      *utils.StringFilter
-	outputQueue *utils.Queue
+	filter      *sf.StringFilter
+	outputQueue *queue.Queue
 
 	metricsLock       sync.RWMutex
 	dnsQueriesPerSec  int
@@ -60,33 +57,37 @@ type Enumeration struct {
 // NewEnumeration returns an initialized Enumeration that has not been started yet.
 func NewEnumeration() *Enumeration {
 	e := &Enumeration{
-		Config: &config.Config{
-			UUID:           uuid.New(),
-			Log:            log.New(ioutil.Discard, "", 0),
-			Alterations:    true,
-			FlipWords:      true,
-			FlipNumbers:    true,
-			AddWords:       true,
-			AddNumbers:     true,
-			MinForWordFlip: 2,
-			EditDistance:   1,
-			Recursive:      true,
-		},
+		Config:      config.NewConfig(),
 		Bus:         eb.NewEventBus(),
-		Pool:        resolvers.NewResolverPool(nil),
 		Output:      make(chan *requests.Output, 100),
-		Done:        make(chan struct{}, 2),
+		done:        make(chan struct{}, 2),
 		pause:       make(chan struct{}, 2),
 		resume:      make(chan struct{}, 2),
-		filter:      utils.NewStringFilter(),
-		outputQueue: new(utils.Queue),
+		filter:      sf.NewStringFilter(),
+		outputQueue: new(queue.Queue),
 	}
+
+	e.Pool = resolvers.SetupResolverPool(
+		e.Config.Resolvers,
+		e.Config.ScoreResolvers,
+		e.Config.MonitorResolverRate,
+	)
 	if e.Pool == nil {
 		return nil
 	}
 
-	e.dataSources = sources.GetAllSources(e.Config, e.Bus, e.Pool)
 	return e
+}
+
+// Done safely closes the done broadcast channel.
+func (e *Enumeration) Done() {
+	e.Lock()
+	defer e.Unlock()
+
+	if !e.doneAlreadyClosed {
+		e.doneAlreadyClosed = true
+		close(e.done)
+	}
 }
 
 // Start begins the DNS enumeration process for the Amass Enumeration object.
@@ -99,6 +100,8 @@ func (e *Enumeration) Start() error {
 		return err
 	}
 
+	e.dataSources = sources.GetAllSources(e.Config, e.Bus, e.Pool)
+
 	// Setup the correct graph database handler
 	err := e.setupGraph()
 	if err != nil {
@@ -108,11 +111,6 @@ func (e *Enumeration) Start() error {
 
 	e.Bus.Subscribe(requests.OutputTopic, e.sendOutput)
 	defer e.Bus.Unsubscribe(requests.OutputTopic, e.sendOutput)
-
-	// Select the data sources desired by the user
-	if len(e.Config.DisabledDataSources) > 0 {
-		e.dataSources = ExcludeDisabledDataSources(e.dataSources, e.Config)
-	}
 
 	// Add all the data sources that successfully start to the list
 	var sources []services.Service
@@ -135,25 +133,35 @@ func (e *Enumeration) Start() error {
 	}
 	services = append(services, e.dataSources...)
 
+	// The enumeration will not terminate until all output has been processed
+	var wg sync.WaitGroup
+
 	// Use all previously discovered names that are in scope
-	go e.submitKnownNames()
-	go e.submitProvidedNames()
+	wg.Add(2)
+	go e.submitKnownNames(&wg)
+	go e.submitProvidedNames(&wg)
 
 	// Start with the first domain name provided in the configuration
 	e.releaseDomainName()
 
-	// The enumeration will not terminate until all output has been processed
-	var wg sync.WaitGroup
 	wg.Add(2)
 	go e.checkForOutput(&wg)
 	go e.processOutput(&wg)
 
 	t := time.NewTicker(2 * time.Second)
 	logTick := time.NewTicker(time.Minute)
+
+	if e.Config.Timeout > 0 {
+		time.AfterFunc(time.Duration(e.Config.Timeout)*time.Minute, func() {
+			e.Config.Log.Printf("Enumeration exceeded provided timeout")
+			e.Done()
+		})
+	}
+
 loop:
 	for {
 		select {
-		case <-e.Done:
+		case <-e.done:
 			break loop
 		case <-e.PauseChan():
 			t.Stop()
@@ -182,8 +190,8 @@ func (e *Enumeration) periodicChecks(srvcs []services.Service) {
 			break
 		}
 	}
-	if done {
-		close(e.Done)
+	if done && !e.Pool.IsActive() {
+		e.Done()
 		return
 	}
 
@@ -223,7 +231,8 @@ func (e *Enumeration) releaseDomainName() {
 	e.domainIdx++
 }
 
-func (e *Enumeration) submitKnownNames() {
+func (e *Enumeration) submitKnownNames(wg *sync.WaitGroup) {
+	defer wg.Done()
 	for _, enum := range e.Graph.EnumerationList() {
 		var found bool
 
@@ -242,16 +251,17 @@ func (e *Enumeration) submitKnownNames() {
 				e.Bus.Publish(requests.NewNameTopic, &requests.DNSRequest{
 					Name:   o.Name,
 					Domain: o.Domain,
-					Tag:    o.Tag,
-					Source: o.Source,
+					Tag:    requests.EXTERNAL,
+					Source: "Previous Enum",
 				})
 			}
 		}
 	}
 }
 
-func (e *Enumeration) submitProvidedNames() {
-	for _, name := range e.ProvidedNames {
+func (e *Enumeration) submitProvidedNames(wg *sync.WaitGroup) {
+	defer wg.Done()
+	for _, name := range e.Config.ProvidedNames {
 		if domain := e.Config.WhichDomain(name); domain != "" {
 			e.Bus.Publish(requests.NewNameTopic, &requests.DNSRequest{
 				Name:   name,
@@ -349,7 +359,7 @@ func (e *Enumeration) processOutput(wg *sync.WaitGroup) {
 loop:
 	for {
 		select {
-		case <-e.Done:
+		case <-e.done:
 			break loop
 		default:
 			element, ok := e.outputQueue.Next()
@@ -389,7 +399,7 @@ func (e *Enumeration) checkForOutput(wg *sync.WaitGroup) {
 
 	for {
 		select {
-		case <-e.Done:
+		case <-e.done:
 			// Handle all remaining pieces of output
 			e.queueNewGraphEntries(e.Config.UUID.String(), time.Millisecond)
 			return
@@ -417,7 +427,7 @@ func (e *Enumeration) queueNewGraphEntries(uuid string, delay time.Duration) {
 
 func (e *Enumeration) sendOutput(o *requests.Output) {
 	select {
-	case <-e.Done:
+	case <-e.done:
 		return
 	default:
 		if e.Config.IsDomainInScope(o.Name) {
@@ -454,24 +464,4 @@ func (e *Enumeration) GetAllSourceNames() []string {
 		names = append(names, source.String())
 	}
 	return names
-}
-
-// ExcludeDisabledDataSources returns a list of data sources excluding DisabledDataSources.
-func ExcludeDisabledDataSources(srvs []services.Service, cfg *config.Config) []services.Service {
-	var enabled []services.Service
-
-	for _, s := range srvs {
-		include := true
-
-		for _, disabled := range cfg.DisabledDataSources {
-			if strings.EqualFold(disabled, s.String()) {
-				include = false
-				break
-			}
-		}
-		if include {
-			enabled = append(enabled, s)
-		}
-	}
-	return enabled
 }

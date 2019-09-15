@@ -11,9 +11,11 @@ import (
 	"github.com/OWASP/Amass/config"
 	eb "github.com/OWASP/Amass/eventbus"
 	"github.com/OWASP/Amass/graph"
+	"github.com/OWASP/Amass/net/dns"
+	"github.com/OWASP/Amass/queue"
 	"github.com/OWASP/Amass/requests"
 	"github.com/OWASP/Amass/resolvers"
-	"github.com/OWASP/Amass/utils"
+	sf "github.com/OWASP/Amass/stringfilter"
 )
 
 var (
@@ -43,11 +45,11 @@ type timesRequest struct {
 type NameService struct {
 	BaseService
 
-	filter            *utils.StringFilter
-	times             *utils.Queue
+	filter            *sf.StringFilter
+	times             *queue.Queue
 	sanityRE          *regexp.Regexp
-	trustedNameFilter *utils.StringFilter
-	otherNameFilter   *utils.StringFilter
+	trustedNameFilter *sf.StringFilter
+	otherNameFilter   *sf.StringFilter
 	graph             graph.DataHandler
 }
 
@@ -55,11 +57,11 @@ type NameService struct {
 // The object returned is initialized, but has not yet been started.
 func NewNameService(cfg *config.Config, bus *eb.EventBus, pool *resolvers.ResolverPool) *NameService {
 	ns := &NameService{
-		filter:            utils.NewStringFilter(),
-		times:             new(utils.Queue),
-		sanityRE:          utils.AnySubdomainRegex(),
-		trustedNameFilter: utils.NewStringFilter(),
-		otherNameFilter:   utils.NewStringFilter(),
+		filter:            sf.NewStringFilter(),
+		times:             new(queue.Queue),
+		sanityRE:          dns.AnySubdomainRegex(),
+		trustedNameFilter: sf.NewStringFilter(),
+		otherNameFilter:   sf.NewStringFilter(),
 	}
 	ns.BaseService = *NewBaseService(ns, "Name Service", cfg, bus, pool)
 	return ns
@@ -86,7 +88,7 @@ func (ns *NameService) newNameEvent(req *requests.DNSRequest) {
 		return
 	}
 
-	req.Name = strings.ToLower(utils.RemoveAsteriskLabel(req.Name))
+	req.Name = strings.ToLower(dns.RemoveAsteriskLabel(req.Name))
 	req.Domain = strings.ToLower(req.Domain)
 
 	tt := requests.TrustedTag(req.Tag)

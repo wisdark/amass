@@ -12,9 +12,10 @@ import (
 
 	"github.com/OWASP/Amass/config"
 	eb "github.com/OWASP/Amass/eventbus"
+	"github.com/OWASP/Amass/net/http"
 	"github.com/OWASP/Amass/requests"
 	"github.com/OWASP/Amass/resolvers"
-	"github.com/OWASP/Amass/utils"
+	sf "github.com/OWASP/Amass/stringfilter"
 )
 
 var (
@@ -50,7 +51,7 @@ var (
 type AddressService struct {
 	BaseService
 
-	filter *utils.StringFilter
+	filter *sf.StringFilter
 }
 
 func init() {
@@ -65,7 +66,7 @@ func init() {
 
 // NewAddressService returns he object initialized, but not yet started.
 func NewAddressService(cfg *config.Config, bus *eb.EventBus, pool *resolvers.ResolverPool) *AddressService {
-	as := &AddressService{filter: utils.NewStringFilter()}
+	as := &AddressService{filter: sf.NewStringFilter()}
 
 	as.BaseService = *NewBaseService(as, "Address Service", cfg, bus, pool)
 	return as
@@ -109,8 +110,8 @@ func (as *AddressService) performAddrRequest(req *requests.AddrRequest) {
 	if req == nil || req.Address == "" {
 		return
 	}
-	as.SetActive()
 
+	as.SetActive()
 	if as.filter.Duplicate(req.Address) {
 		return
 	}
@@ -124,16 +125,20 @@ func (as *AddressService) performAddrRequest(req *requests.AddrRequest) {
 	}
 
 	if as.Config().Active {
-		for _, name := range utils.PullCertificateNames(req.Address, as.Config().Ports) {
-			if n := strings.TrimSpace(name); n != "" {
-				if domain := as.Config().WhichDomain(n); domain != "" {
-					as.Bus().Publish(requests.NewNameTopic, &requests.DNSRequest{
-						Name:   n,
-						Domain: domain,
-						Tag:    requests.CERT,
-						Source: "Active Cert",
-					})
-				}
+		as.namesFromCertificates(req.Address)
+	}
+}
+
+func (as *AddressService) namesFromCertificates(addr string) {
+	for _, name := range http.PullCertificateNames(addr, as.Config().Ports) {
+		if n := strings.TrimSpace(name); n != "" {
+			if domain := as.Config().WhichDomain(n); domain != "" {
+				as.Bus().Publish(requests.NewNameTopic, &requests.DNSRequest{
+					Name:   n,
+					Domain: domain,
+					Tag:    requests.CERT,
+					Source: "Active Cert",
+				})
 			}
 		}
 	}
@@ -157,7 +162,7 @@ func (as *AddressService) updateConfigWithNetblocks(req *requests.ASNRequest) {
 		return
 	}
 
-	filter := utils.NewStringFilter()
+	filter := sf.NewStringFilter()
 	for _, cidr := range as.Config().CIDRs {
 		filter.Duplicate(cidr.String())
 	}

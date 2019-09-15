@@ -13,10 +13,11 @@ import (
 
 	"github.com/OWASP/Amass/config"
 	eb "github.com/OWASP/Amass/eventbus"
+	"github.com/OWASP/Amass/net/http"
 	"github.com/OWASP/Amass/requests"
 	"github.com/OWASP/Amass/resolvers"
 	"github.com/OWASP/Amass/services"
-	"github.com/OWASP/Amass/utils"
+	sf "github.com/OWASP/Amass/stringfilter"
 )
 
 const commonCrawlIndexListURL = "https://index.commoncrawl.org/collinfo.json"
@@ -42,7 +43,7 @@ func (c *CommonCrawl) OnStart() error {
 	c.BaseService.OnStart()
 
 	// Get all of the index API URLs
-	page, err := utils.RequestWebPage(commonCrawlIndexListURL, nil, nil, "", "")
+	page, err := http.RequestWebPage(commonCrawlIndexListURL, nil, nil, "", "")
 	if err != nil {
 		c.Bus().Publish(requests.LogTopic,
 			fmt.Sprintf("%s: Failed to obtain the index list: %v", c.String(), err),
@@ -89,7 +90,7 @@ func (c *CommonCrawl) processRequests() {
 }
 
 func (c *CommonCrawl) executeQuery(domain string) {
-	filter := utils.NewStringFilter()
+	filter := sf.NewStringFilter()
 	re := c.Config().DomainRegex(domain)
 	if re == nil {
 		return
@@ -106,7 +107,7 @@ func (c *CommonCrawl) executeQuery(domain string) {
 			return
 		case <-t.C:
 			u := c.getURL(domain, index)
-			page, err := utils.RequestWebPage(u, nil, nil, "", "")
+			page, err := http.RequestWebPage(u, nil, nil, "", "")
 			if err != nil {
 				c.Bus().Publish(requests.LogTopic, fmt.Sprintf("%s: %s: %v", c.String(), u, err))
 				continue
@@ -128,7 +129,7 @@ func (c *CommonCrawl) executeQuery(domain string) {
 
 func (c *CommonCrawl) parseJSON(page string) []string {
 	var urls []string
-	filter := utils.NewStringFilter()
+	filter := sf.NewStringFilter()
 
 	scanner := bufio.NewScanner(strings.NewReader(page))
 	for scanner.Scan() {

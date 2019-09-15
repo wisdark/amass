@@ -36,7 +36,7 @@ archives:
       - LICENSE
       - README.md
       - doc/*
-      - wordlists/*
+      - examples/wordlists/*
 
 checksum:
   name_template: "amass_checksums.txt"
@@ -80,7 +80,7 @@ snapcrafts:
   -
     name: amass
     # Remember you need to `snapcraft login` first.
-    publish: true
+    publish: false
     summary: In-depth DNS Enumeration and Network Mapping.
     description: The OWASP Amass Project has developed a tool to help information security professionals perform network mapping of attack surfaces and external asset discovery using open source information gathering and active reconnaissance techniques.
     grade: stable
@@ -90,12 +90,13 @@ snapcrafts:
 
     apps:
       amass:
-        plugs: ["home", "network", "removable-media"]
-#        plugs: ["home", "network", "removable-media", "personal-files"]
+        plugs: ["home", "network", "removable-media", "personal-files"]
 
-#    plugs:
-#      personal-files:
-#        read:
-#        - $HOME/.amass
-#        write:
-#        - $HOME/.amass
+    plugs:
+      personal-files:
+        read:
+        - $HOME/.amass
+        - $HOME/.config/amass
+        write:
+        - $HOME/.amass
+        - $HOME/.config/amass

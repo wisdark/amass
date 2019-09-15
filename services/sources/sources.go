@@ -12,10 +12,11 @@ import (
 
 	"github.com/OWASP/Amass/config"
 	eb "github.com/OWASP/Amass/eventbus"
+	"github.com/OWASP/Amass/net/http"
 	"github.com/OWASP/Amass/resolvers"
+	"github.com/OWASP/Amass/semaphore"
 	"github.com/OWASP/Amass/services"
 	"github.com/OWASP/Amass/stringset"
-	"github.com/OWASP/Amass/utils"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/geziyor/geziyor"
 	"github.com/geziyor/geziyor/client"
@@ -23,12 +24,12 @@ import (
 
 var (
 	nameStripRE = regexp.MustCompile("^((20)|(25)|(2b)|(2f)|(3d)|(3a)|(40))+")
-	maxCrawlSem = utils.NewSimpleSemaphore(50)
+	maxCrawlSem = semaphore.NewSimpleSemaphore(50)
 )
 
 // GetAllSources returns a slice of all data source services, initialized and ready.
 func GetAllSources(cfg *config.Config, bus *eb.EventBus, pool *resolvers.ResolverPool) []services.Service {
-	return []services.Service{
+	srvs := []services.Service{
 		NewAlienVault(cfg, bus, pool),
 		NewArchiveIt(cfg, bus, pool),
 		NewArchiveToday(cfg, bus, pool),
@@ -81,6 +82,30 @@ func GetAllSources(cfg *config.Config, bus *eb.EventBus, pool *resolvers.Resolve
 		NewWayback(cfg, bus, pool),
 		NewYahoo(cfg, bus, pool),
 	}
+
+	// Filtering in-place - https://github.com/golang/go/wiki/SliceTricks
+	i := 0
+	for _, s := range srvs {
+		if shouldEnable(s.String(), cfg) {
+			srvs[i] = s
+			i++
+		}
+	}
+	srvs = srvs[:i]
+	return srvs
+}
+
+func shouldEnable(srvName string, cfg *config.Config) bool {
+	include := !cfg.SourceFilter.Include
+
+	for _, name := range cfg.SourceFilter.Sources {
+		if strings.EqualFold(srvName, name) {
+			include = cfg.SourceFilter.Include
+			break
+		}
+	}
+
+	return include
 }
 
 // Clean up the names scraped from the web.
@@ -119,7 +144,7 @@ func crawl(service services.Service, baseURL, baseDomain, subdomain, domain stri
 		AllowedDomains:              []string{baseDomain},
 		StartURLs:                   []string{start},
 		Timeout:                     30 * time.Second,
-		UserAgent:                   utils.UserAgent,
+		UserAgent:                   http.UserAgent,
 		RequestDelay:                time.Second,
 		RequestDelayRandomize:       true,
 		LogDisabled:                 true,

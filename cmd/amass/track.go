@@ -14,8 +14,8 @@ import (
 	"github.com/OWASP/Amass/config"
 	"github.com/OWASP/Amass/graph"
 	"github.com/OWASP/Amass/requests"
+	sf "github.com/OWASP/Amass/stringfilter"
 	"github.com/OWASP/Amass/stringset"
-	"github.com/OWASP/Amass/utils"
 	"github.com/fatih/color"
 )
 
@@ -108,7 +108,7 @@ func runTrackCommand(clArgs []string) {
 
 	cfg := new(config.Config)
 	// Check if a configuration file was provided, and if so, load the settings
-	if _, err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
+	if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
 		if args.Filepaths.Directory == "" {
 			args.Filepaths.Directory = cfg.Dir
 		}
@@ -172,7 +172,7 @@ func runTrackCommand(clArgs []string) {
 
 func cumulativeOutput(domains []string, enums []string, ea, la []time.Time, db graph.DataHandler) {
 	idx := len(enums) - 1
-	filter := utils.NewStringFilter()
+	filter := sf.NewStringFilter()
 
 	var cum []*requests.Output
 	for i := idx - 1; i >= 0; i-- {

@@ -12,9 +12,10 @@ import (
 
 	"github.com/OWASP/Amass/config"
 	eb "github.com/OWASP/Amass/eventbus"
+	amassnet "github.com/OWASP/Amass/net"
 	"github.com/OWASP/Amass/requests"
 	"github.com/OWASP/Amass/resolvers"
-	"github.com/OWASP/Amass/utils"
+	sf "github.com/OWASP/Amass/stringfilter"
 	"github.com/miekg/dns"
 )
 
@@ -44,13 +45,13 @@ type DNSService struct {
 	totalLock  sync.RWMutex
 	totalNames int
 
-	filter        *utils.StringFilter
+	filter        *sf.StringFilter
 	cidrBlacklist []*net.IPNet
 }
 
 // NewDNSService returns he object initialized, but not yet started.
 func NewDNSService(cfg *config.Config, bus *eb.EventBus, pool *resolvers.ResolverPool) *DNSService {
-	ds := &DNSService{filter: utils.NewStringFilter()}
+	ds := &DNSService{filter: sf.NewStringFilter()}
 
 	for _, n := range badSubnets {
 		if _, ipnet, err := net.ParseCIDR(n); err == nil {
@@ -375,9 +376,9 @@ func (ds *DNSService) reverseDNSSweep(addr string, cidr *net.IPNet) {
 
 	// Get information about nearby IP addresses
 	if ds.Config().Active {
-		ips = utils.CIDRSubset(cidr, addr, 500)
+		ips = amassnet.CIDRSubset(cidr, addr, 500)
 	} else {
-		ips = utils.CIDRSubset(cidr, addr, 250)
+		ips = amassnet.CIDRSubset(cidr, addr, 250)
 	}
 
 	for _, ip := range ips {
@@ -396,7 +397,7 @@ func (ds *DNSService) reverseDNSQuery(ip string) {
 	defer ds.Config().SemMaxDNSQueries.Release(1)
 
 	ds.SetActive()
-	ptr, answer, err := ds.Pool().ReverseDNS(ip)
+	ptr, answer, err := ds.Pool().Reverse(ip)
 	ds.metrics.QueryTime(time.Now())
 	if err != nil {
 		return

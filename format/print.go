@@ -1,20 +1,20 @@
 // Copyright 2017 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
-package utils
+package format
 
 import (
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/OWASP/Amass/net"
 	"github.com/OWASP/Amass/requests"
 	"github.com/fatih/color"
 )
 
 // Banner is the ASCII art logo used within help output.
 const Banner = `
-
         .+++:.            :                             .+++.
       +W@@@@@@8        &+W@#               o8W8:      +W@@@@@@#.   oW@@@W#+
      &@#+   .o@##.    .@@@o@W.o@@o       :@@#&W8o    .@#:  .:oW+  .@#+++&#&
@@ -27,15 +27,17 @@ const Banner = `
      :@W:      o@# +Wo &@+        :W: +@W&o++o@W. &@&  8@#o+&@W.  #@:    o@+
       :W@@WWWW@@8       +              :&W@@@@&    &W  .o#@@W&.   :W@WWW@@&
         +o&&&&+.                                                    +oooo.
-
 `
 
 const (
 	// Version is used to display the current version of Amass.
-	Version = "v3.0.27"
+	Version = "v3.1.4"
 
 	// Author is used to display the Amass Project Team.
 	Author = "OWASP Amass Project - @owaspamass"
+
+	// Description is the slogan for the Amass Project.
+	Description = "In-depth Attack Surface Mapping and Asset Discovery"
 )
 
 var (
@@ -145,7 +147,6 @@ func PrintBanner() {
 	y := color.New(color.FgHiYellow)
 	r := color.New(color.FgHiRed)
 	rightmost := 76
-	desc := "In-depth DNS Enumeration and Network Mapping"
 
 	pad := func(num int) {
 		for i := 0; i < num; i++ {
@@ -157,8 +158,8 @@ func PrintBanner() {
 	y.Fprintln(color.Error, Version)
 	pad(rightmost - len(Author))
 	y.Fprintln(color.Error, Author)
-	pad(rightmost - len(desc))
-	y.Fprintf(color.Error, "%s\n\n\n", desc)
+	pad(rightmost - len(Description))
+	y.Fprintf(color.Error, "%s\n\n\n", Description)
 }
 
 func censorDomain(input string) string {
@@ -222,9 +223,9 @@ func DesiredAddrTypes(addrs []requests.AddressInfo, ipv4, ipv6 bool) []requests.
 
 	var keep []requests.AddressInfo
 	for _, addr := range addrs {
-		if IsIPv4(addr.Address) && !ipv4 {
+		if net.IsIPv4(addr.Address) && !ipv4 {
 			continue
-		} else if IsIPv6(addr.Address) && !ipv6 {
+		} else if net.IsIPv6(addr.Address) && !ipv6 {
 			continue
 		}
 		keep = append(keep, addr)

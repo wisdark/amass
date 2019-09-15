@@ -28,7 +28,7 @@ amass enum -d example.com
 Typical parameters for DNS enumeration:
 
 ```bash
-$ amass enum -src -brute -min-for-recursive 1 -d example.com
+$ amass enum -src -brute -min-for-recursive 2 -d example.com
 [Google] www.example.com
 [VirusTotal] ns.example.com
 ...
@@ -81,13 +81,17 @@ The intel subcommand can help you discover additional root domain names associat
 | -list | Print the names of all available data sources | amass intel -list |
 | -log | Path to the log file where errors will be written | amass intel -log amass.log -whois -d example.com |
 | -max-dns-queries | Maximum number of concurrent DNS queries | amass intel -max-dns-queries 200 -whois -d example.com |
+| -noresolvrate | Disable resolver rate monitoring | amass intel -cidr 104.154.0.0/15 -noresolvrate |
+| -noresolvscore | Disable resolver reliability scoring | amass intel -cidr 104.154.0.0/15 -noresolvscore |
 | -o | Path to the text output file | amass intel -o out.txt -whois -d example.com |
 | -org | Search string provided against AS description information | amass intel -org Facebook |
 | -p | Ports separated by commas (default: 443) | amass intel -cidr 104.154.0.0/15 -p 443,8080 |
+| -public-dns | Use public-dns.info resolvers |amass intel -cidr 104.154.0.0/15 -public-dns |
 | -r | IP addresses of preferred DNS resolvers (can be used multiple times) | amass intel -r 8.8.8.8,1.1.1.1 -whois -d example.com |
 | -rf | Path to a file providing preferred DNS resolvers | amass intel -rf data/resolvers.txt -whois -d example.com |
 | -src | Print data sources for the discovered names | amass intel -src -whois -d example.com |
-| -whois | All discovered domains are run through reverse whois | amass intel -asn 13374 |
+| -timeout | Number of minutes to execute the enumeration | amass intel -timeout 30 -d example.com |
+| -whois | All discovered domains are run through reverse whois | amass intel -whois -d example.com |
 
 ### The 'enum' Subcommand
 
@@ -122,13 +126,17 @@ This subcommand will perform DNS enumeration and network mapping while populatin
 | -nf | Path to a file providing already known subdomain names (from other tools/sources) | amass enum -nf names.txt -d example.com |
 | -noalts | Disable generation of altered names | amass enum -noalts -d example.com |
 | -norecursive | Turn off recursive brute forcing | amass enum -brute -norecursive -d example.com |
+| -noresolvrate | Disable resolver rate monitoring | amass enum -d example.com -noresolvrate |
+| -noresolvscore | Disable resolver reliability scoring | amass enum -d example.com -noresolvscore |
 | -o | Path to the text output file | amass enum -o out.txt -d example.com |
 | -oA | Path prefix used for naming all output files | amass enum -oA amass_scan -d example.com |
 | -passive | A purely passive mode of execution | amass enum --passive -d example.com |
-| -p | Ports separated by commas (default: 443) | amass intel -cidr 104.154.0.0/15 -p 443,8080 |
+| -p | Ports separated by commas (default: 443) | amass enum -d example.com -p 443,8080 |
+| -public-dns | Use public-dns.info resolvers | amass enum -d example.com -public-dns |
 | -r | IP addresses of preferred DNS resolvers (can be used multiple times) | amass enum -r 8.8.8.8,1.1.1.1 -d example.com |
 | -rf | Path to a file providing preferred DNS resolvers | amass enum -rf data/resolvers.txt -d example.com |
 | -src | Print data sources for the discovered names | amass enum -src -d example.com |
+| -timeout | Number of minutes to execute the enumeration | amass enum -timeout 30 -d example.com |
 | -w | Path to a different wordlist file | amass enum -brute -w wordlist.txt -d example.com |
 
 ### The 'viz' Subcommand
@@ -227,6 +235,9 @@ You will need a config file to use your API keys with Amass. See the [Example Co
 | Option | Description |
 |--------|-------------|
 | resolver | The IP address of a DNS resolver and used globally by the amass package |
+| public_dns_resolvers | Incorporate public-dns.info resolvers into the enumeration |
+| score_resolvers | Toggle resolver reliability scoring |
+| monitor_resolver_rate | Toggle resolver rate monitoring |
 
 ### The blacklisted Section
 

@@ -4,6 +4,7 @@
 package sources
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -11,10 +12,10 @@ import (
 
 	"github.com/OWASP/Amass/config"
 	eb "github.com/OWASP/Amass/eventbus"
+	"github.com/OWASP/Amass/net/http"
 	"github.com/OWASP/Amass/requests"
 	"github.com/OWASP/Amass/resolvers"
 	"github.com/OWASP/Amass/services"
-	"github.com/OWASP/Amass/utils"
 )
 
 // Baidu is the Service that handles access to the Baidu data source.
@@ -80,7 +81,7 @@ func (b *Baidu) executeQuery(domain string) {
 			return
 		case <-t.C:
 			u := b.urlByPageNum(domain, i)
-			page, err := utils.RequestWebPage(u, nil, nil, "", "")
+			page, err := http.RequestWebPage(u, nil, nil, "", "")
 			if err != nil {
 				b.Bus().Publish(requests.LogTopic, fmt.Sprintf("%s: %s: %v", b.String(), u, err))
 				return
@@ -96,6 +97,37 @@ func (b *Baidu) executeQuery(domain string) {
 			}
 		}
 	}
+
+	time.Sleep(time.Second)
+	// Check for related sites known by Baidu
+	u := b.urlForRelatedSites(domain)
+	page, err := http.RequestWebPage(u, nil, nil, "", "")
+	if err != nil {
+		b.Bus().Publish(requests.LogTopic, fmt.Sprintf("%s: %s: %v", b.String(), u, err))
+		return
+	}
+
+	// Extract the related site information
+	var rs struct {
+		Code int `json:"code"`
+		Data []struct {
+			Domain string `json:"domain"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(page), &rs); err != nil || rs.Code != 0 {
+		return
+	}
+
+	for _, element := range rs.Data {
+		if d := b.Config().WhichDomain(element.Domain); d != "" {
+			b.Bus().Publish(requests.NewNameTopic, &requests.DNSRequest{
+				Name:   element.Domain,
+				Domain: d,
+				Tag:    b.SourceType,
+				Source: b.String(),
+			})
+		}
+	}
 }
 
 func (b *Baidu) urlByPageNum(domain string, page int) string {
@@ -108,5 +140,12 @@ func (b *Baidu) urlByPageNum(domain string, page int) string {
 		"wd": {query},
 		"oq": {query},
 	}.Encode()
+	return u.String()
+}
+
+func (b *Baidu) urlForRelatedSites(domain string) string {
+	u, _ := url.Parse("https://ce.baidu.com/index/getRelatedSites")
+
+	u.RawQuery = url.Values{"site_address": {domain}}.Encode()
 	return u.String()
 }

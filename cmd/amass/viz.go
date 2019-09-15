@@ -17,7 +17,7 @@ import (
 	"github.com/OWASP/Amass/config"
 	"github.com/OWASP/Amass/graph"
 	"github.com/OWASP/Amass/stringset"
-	"github.com/OWASP/Amass/utils/viz"
+	"github.com/OWASP/Amass/viz"
 	"github.com/fatih/color"
 )
 
@@ -120,7 +120,6 @@ func runVizCommand(clArgs []string) {
 	// Obtain access to the graph database
 	if args.Filepaths.Input != "" {
 		uuid, db, err = inputFileToDB(&args)
-		args.Filepaths.Directory, err = ioutil.TempDir("", config.DefaultOutputDirectory)
 		if err == nil {
 			defer os.RemoveAll(args.Filepaths.Directory)
 			defer db.Close()
@@ -128,7 +127,7 @@ func runVizCommand(clArgs []string) {
 	} else {
 		cfg := new(config.Config)
 		// Check if a configuration file was provided, and if so, load the settings
-		if _, err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
+		if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
 			if args.Filepaths.Directory == "" {
 				args.Filepaths.Directory = cfg.Dir
 			}
@@ -185,7 +184,7 @@ func runVizCommand(clArgs []string) {
 func inputFileToDB(args *vizArgs) (string, graph.DataHandler, error) {
 	var err error
 
-	args.Filepaths.Directory, err = ioutil.TempDir("", config.DefaultOutputDirectory)
+	args.Filepaths.Directory, err = ioutil.TempDir("", "amass")
 	if err != nil {
 		return "", nil, fmt.Errorf("Failed to open the temporary directory: %v", err)
 	}
