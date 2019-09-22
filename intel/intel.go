@@ -6,6 +6,7 @@ package intel
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -60,15 +61,6 @@ func NewCollection() *Collection {
 		activeChan: make(chan struct{}, 100),
 	}
 
-	c.Pool = resolvers.SetupResolverPool(
-		c.Config.Resolvers,
-		c.Config.ScoreResolvers,
-		c.Config.MonitorResolverRate,
-	)
-	if c.Pool == nil {
-		return nil
-	}
-
 	return c
 }
 
@@ -89,6 +81,17 @@ func (c *Collection) HostedDomains() error {
 		return errors.New("The intelligence collection did not have an output channel")
 	} else if err := c.Config.CheckSettings(); err != nil {
 		return err
+	}
+
+	if c.Pool == nil {
+		c.Pool = resolvers.SetupResolverPool(
+			c.Config.Resolvers,
+			c.Config.ScoreResolvers,
+			c.Config.MonitorResolverRate,
+		)
+		if c.Pool == nil {
+			return errors.New("The intelligence collection was unable to build the pool of resolvers")
+		}
 	}
 
 	go c.startAddressRanges()
@@ -304,13 +307,12 @@ func LookupASNsByName(s string) ([]*requests.ASNRequest, error) {
 	var records []*requests.ASNRequest
 
 	s = strings.ToLower(s)
-	url := "https://raw.githubusercontent.com/OWASP/Amass/master/wordlists/asnlist.txt"
-	page, err := http.RequestWebPage(url, nil, nil, "", "")
+	content, err := config.BoxOfDefaultFiles.FindString("asnlist.txt")
 	if err != nil {
-		return records, err
+		return records, fmt.Errorf("Failed to obtain the embedded ASN information: asnlist.txt: %v", err)
 	}
 
-	scanner := bufio.NewScanner(strings.NewReader(page))
+	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
 		line := scanner.Text()
 
