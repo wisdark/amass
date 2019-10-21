@@ -5,24 +5,38 @@ package resolvers
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/OWASP/Amass/eventbus"
 	amassnet "github.com/OWASP/Amass/net"
 	"github.com/OWASP/Amass/queue"
 	"github.com/OWASP/Amass/requests"
 	"github.com/miekg/dns"
 )
 
-// Index values into the Resolver.Stats map
+// The priority levels for DNS resolution.
 const (
-	QueryAttempts = 64
-	QueryTimeout  = 65
-	QueryRTT      = 66
+	PriorityLow int = iota
+	PriorityHigh
+	PriorityCritical
 )
+
+// Index values into the Resolver.Stats map.
+const (
+	QueryAttempts  = 64
+	QueryTimeout   = 65
+	QueryRTT       = 66
+	QueryCompleted = 67
+)
+
+// NotAvailableRcode is our made up rcode to indicate an availability problem.
+const NotAvailableRcode = 256
 
 const (
 	defaultWindowDuration = 2 * time.Second
@@ -65,14 +79,20 @@ func makeResolveResult(rec []requests.DNSAnswer, again bool, err string, rcode i
 
 // Resolver is the object type for performing DNS resolutions.
 type Resolver interface {
+	// Address returns the IP address where the resolver is located
+	Address() string
+
+	// Port returns the port number used to communicate with the resolver
+	Port() int
+
 	// Resolve performs DNS queries using the Resolver
-	Resolve(ctx context.Context, name, qtype string) ([]requests.DNSAnswer, bool, error)
+	Resolve(ctx context.Context, name, qtype string, priority int) ([]requests.DNSAnswer, bool, error)
 
 	// Reverse is performs reverse DNS queries using the Resolver
-	Reverse(ctx context.Context, addr string) (string, string, error)
+	Reverse(ctx context.Context, addr string, priority int) (string, string, error)
 
 	// Available returns true if the Resolver can handle another DNS request
-	Available() bool
+	Available() (bool, error)
 
 	// Stats returns performance counters
 	Stats() map[int]int64
@@ -81,28 +101,40 @@ type Resolver interface {
 	// ReportError indicates to the Resolver that it delivered an erroneos response
 	ReportError()
 
+	// MatchesWildcard returns true if the request provided resolved to a DNS wildcard
+	MatchesWildcard(req *requests.DNSRequest) bool
+
+	// GetWildcardType returns the DNS wildcard type for the provided subdomain name
+	GetWildcardType(req *requests.DNSRequest) int
+
+	// SubdomainToDomain returns the first subdomain name of the provided
+	// parameter that responds to a DNS query for the NS record type
+	SubdomainToDomain(name string) string
+
 	// Stop the Resolver
 	Stop() error
+	IsStopped() bool
 }
 
 // BaseResolver performs DNS queries on a single resolver at high-performance.
 type BaseResolver struct {
 	sync.RWMutex
-	Address        string
-	Port           string
+	Done           chan struct{}
 	WindowDuration time.Duration
 	CurrentConn    net.Conn
 	LastConn       net.Conn
-	XchgQueue      *queue.Queue
-	XchgChan       chan *resolveRequest
-	XchgsLock      sync.Mutex
-	Xchgs          map[uint16]*resolveRequest
-	Done           chan struct{}
+	xchgQueues     []*queue.Queue
+	xchgChan       chan *resolveRequest
+	xchgsLock      sync.Mutex
+	xchgs          map[uint16]*resolveRequest
+	address        string
+	port           string
 	stats          map[int]int64
 	attempts       int64
 	timeouts       int64
 	avgrtt         int64
 	numrtt         int64
+	stopLock       sync.Mutex
 	stopped        bool
 }
 
@@ -116,14 +148,18 @@ func NewBaseResolver(addr string) *BaseResolver {
 	}
 
 	r := &BaseResolver{
-		Address:        addr,
-		Port:           port,
-		WindowDuration: defaultWindowDuration,
-		XchgQueue:      new(queue.Queue),
-		XchgChan:       make(chan *resolveRequest, 2000),
-		Xchgs:          make(map[uint16]*resolveRequest),
 		Done:           make(chan struct{}, 2),
-		stats:          make(map[int]int64),
+		WindowDuration: defaultWindowDuration,
+		xchgQueues: []*queue.Queue{
+			new(queue.Queue),
+			new(queue.Queue),
+			new(queue.Queue),
+		},
+		xchgChan: make(chan *resolveRequest, 2000),
+		xchgs:    make(map[uint16]*resolveRequest),
+		address:  addr,
+		port:     port,
+		stats:    make(map[int]int64),
 	}
 
 	r.rotateConnections()
@@ -135,9 +171,12 @@ func NewBaseResolver(addr string) *BaseResolver {
 
 // Stop causes the Resolver to stop sending DNS queries and closes the network connection.
 func (r *BaseResolver) Stop() error {
-	if r.stopped {
+	if r.IsStopped() {
 		return nil
 	}
+
+	r.stopLock.Lock()
+	defer r.stopLock.Unlock()
 
 	r.stopped = true
 	close(r.Done)
@@ -150,12 +189,37 @@ func (r *BaseResolver) Stop() error {
 	return nil
 }
 
-// Available always returns true.
-func (r *BaseResolver) Available() bool {
-	if r.stopped {
-		return false
+// IsStopped implements the Resolver interface.
+func (r *BaseResolver) IsStopped() bool {
+	r.stopLock.Lock()
+	defer r.stopLock.Unlock()
+
+	return r.stopped
+}
+
+// Address implements the Resolver interface.
+func (r *BaseResolver) Address() string {
+	return r.address
+}
+
+// Port implements the Resolver interface.
+func (r *BaseResolver) Port() int {
+	if p, err := strconv.Atoi(r.port); err == nil {
+		return p
 	}
-	return true
+
+	return 0
+}
+
+// Available always returns true.
+func (r *BaseResolver) Available() (bool, error) {
+	if r.IsStopped() {
+		msg := fmt.Sprintf("DNS: Resolver %s has been stopped", r.Address())
+
+		return false, &ResolveError{Err: msg}
+	}
+
+	return true, nil
 }
 
 // Stats returns performance counters.
@@ -190,6 +254,22 @@ func (r *BaseResolver) ReportError() {
 	return
 }
 
+// MatchesWildcard returns true if the request provided resolved to a DNS wildcard.
+func (r *BaseResolver) MatchesWildcard(req *requests.DNSRequest) bool {
+	return false
+}
+
+// GetWildcardType returns the DNS wildcard type for the provided subdomain name.
+func (r *BaseResolver) GetWildcardType(req *requests.DNSRequest) int {
+	return WildcardTypeNone
+}
+
+// SubdomainToDomain returns the first subdomain name of the provided
+// parameter that responds to a DNS query for the NS record type.
+func (r *BaseResolver) SubdomainToDomain(name string) string {
+	return name
+}
+
 func (r *BaseResolver) returnRequest(req *resolveRequest, res *resolveResult) {
 	req.Result <- res
 }
@@ -207,7 +287,7 @@ func (r *BaseResolver) rotateConnections() {
 	for {
 		d := &net.Dialer{}
 
-		r.CurrentConn, err = d.Dial("udp", r.Address+":"+r.Port)
+		r.CurrentConn, err = d.Dial("udp", r.address+":"+r.port)
 		if err == nil {
 			break
 		}
@@ -236,7 +316,18 @@ func (r *BaseResolver) lastConnection() *dns.Conn {
 }
 
 // Resolve performs DNS queries using the Resolver.
-func (r *BaseResolver) Resolve(ctx context.Context, name, qtype string) ([]requests.DNSAnswer, bool, error) {
+func (r *BaseResolver) Resolve(ctx context.Context, name, qtype string, priority int) ([]requests.DNSAnswer, bool, error) {
+	if priority != PriorityCritical && priority != PriorityHigh && priority != PriorityLow {
+		return []requests.DNSAnswer{}, false, &ResolveError{
+			Err:   fmt.Sprintf("Resolver: Invalid priority parameter: %d", priority),
+			Rcode: 100,
+		}
+	}
+
+	if avail, err := r.Available(); !avail {
+		return []requests.DNSAnswer{}, true, err
+	}
+
 	qt, err := textToTypeNum(qtype)
 	if err != nil {
 		return nil, false, &ResolveError{
@@ -246,23 +337,39 @@ func (r *BaseResolver) Resolve(ctx context.Context, name, qtype string) ([]reque
 	}
 
 	resultChan := make(chan *resolveResult)
-	r.XchgQueue.Append(&resolveRequest{
+	// Use the correct queue based on the priority
+	r.xchgQueues[priority].Append(&resolveRequest{
 		Name:   name,
 		Qtype:  qt,
 		Result: resultChan,
 	})
 	result := <-resultChan
+
+	r.Lock()
+	r.stats[QueryCompleted] = r.stats[QueryCompleted] + 1
+	r.Unlock()
+
+	// Report the completion of the DNS query
+	if b := ctx.Value(requests.ContextEventBus); b != nil {
+		bus := b.(*eventbus.EventBus)
+
+		bus.Publish(requests.ResolveCompleted, time.Now())
+	}
+
 	return result.Records, result.Again, result.Err
 }
 
 // Reverse is performs reverse DNS queries using the Resolver.
-func (r *BaseResolver) Reverse(ctx context.Context, addr string) (string, string, error) {
-	var name, ptr string
+func (r *BaseResolver) Reverse(ctx context.Context, addr string, priority int) (string, string, error) {
+	if avail, err := r.Available(); !avail {
+		return "", "", err
+	}
 
+	var name, ptr string
 	if ip := net.ParseIP(addr); amassnet.IsIPv4(ip) {
 		ptr = amassnet.ReverseIP(addr) + ".in-addr.arpa"
 	} else if amassnet.IsIPv6(ip) {
-		ptr = amassnet.IPv6NibbleFormat(amassnet.HexString(ip)) + ".ip6.arpa"
+		ptr = amassnet.IPv6NibbleFormat(hex.EncodeToString(ip)) + ".ip6.arpa"
 	} else {
 		return ptr, "", &ResolveError{
 			Err:   fmt.Sprintf("Invalid IP address parameter: %s", addr),
@@ -270,7 +377,7 @@ func (r *BaseResolver) Reverse(ctx context.Context, addr string) (string, string
 		}
 	}
 
-	answers, _, err := r.Resolve(ctx, ptr, "PTR")
+	answers, _, err := r.Resolve(ctx, ptr, "PTR", priority)
 	if err != nil {
 		return ptr, name, err
 	}
@@ -297,14 +404,14 @@ func (r *BaseResolver) Reverse(ctx context.Context, addr string) (string, string
 }
 
 func (r *BaseResolver) getID() uint16 {
-	r.XchgsLock.Lock()
-	defer r.XchgsLock.Unlock()
+	r.xchgsLock.Lock()
+	defer r.xchgsLock.Unlock()
 
 	var id uint16
 	for {
 		id = dns.Id()
-		if _, found := r.Xchgs[id]; !found {
-			r.Xchgs[id] = new(resolveRequest)
+		if _, found := r.xchgs[id]; !found {
+			r.xchgs[id] = new(resolveRequest)
 			break
 		}
 	}
@@ -312,17 +419,17 @@ func (r *BaseResolver) getID() uint16 {
 }
 
 func (r *BaseResolver) queueRequest(id uint16, req *resolveRequest) {
-	r.XchgsLock.Lock()
-	r.Xchgs[id] = req
-	r.XchgsLock.Unlock()
+	r.xchgsLock.Lock()
+	r.xchgs[id] = req
+	r.xchgsLock.Unlock()
 }
 
 func (r *BaseResolver) pullRequest(id uint16) *resolveRequest {
-	r.XchgsLock.Lock()
-	defer r.XchgsLock.Unlock()
+	r.xchgsLock.Lock()
+	defer r.xchgsLock.Unlock()
 
-	res := r.Xchgs[id]
-	delete(r.Xchgs, id)
+	res := r.xchgs[id]
+	delete(r.xchgs, id)
 	return res
 }
 
@@ -339,18 +446,18 @@ func (r *BaseResolver) checkForTimeouts() {
 			var timeouts []uint16
 
 			// Discover requests that have timed out
-			r.XchgsLock.Lock()
-			for id, req := range r.Xchgs {
+			r.xchgsLock.Lock()
+			for id, req := range r.xchgs {
 				if req.Name != "" && now.After(req.Timestamp.Add(r.WindowDuration)) {
 					timeouts = append(timeouts, id)
 				}
 			}
-			r.XchgsLock.Unlock()
+			r.xchgsLock.Unlock()
 			// Remove the timed out requests from the map
 			for _, id := range timeouts {
 				if req := r.pullRequest(id); req != nil {
 					estr := fmt.Sprintf("DNS query on resolver %s, for %s type %d timed out",
-						r.Address, req.Name, req.Qtype)
+						r.address, req.Name, req.Qtype)
 					r.returnRequest(req, makeResolveResult(nil, true, estr, 100))
 				}
 			}
@@ -364,28 +471,37 @@ func (r *BaseResolver) fillXchgChan() {
 	curIdx := 0
 	maxIdx := 7
 	delays := []int{10, 25, 50, 75, 100, 150, 250, 500}
+loop:
 	for {
 		select {
 		case <-r.Done:
 			return
 		default:
-			element, ok := r.XchgQueue.Next()
-			if !ok {
-				time.Sleep(time.Duration(delays[curIdx]) * time.Millisecond)
-				if curIdx < maxIdx {
-					curIdx++
+			// Pull from the critical queue first
+			for i := PriorityCritical; i >= PriorityLow; i-- {
+				if element, ok := r.xchgQueues[i].Next(); ok {
+					curIdx = 0
+					r.xchgChan <- element.(*resolveRequest)
+					continue loop
 				}
-				continue
 			}
-			curIdx = 0
-			r.XchgChan <- element.(*resolveRequest)
+
+			time.Sleep(time.Duration(delays[curIdx]) * time.Millisecond)
+			if curIdx < maxIdx {
+				curIdx++
+			}
 		}
 	}
 }
 
-// exchanges encapsulates miekg/dns usage
+type message struct {
+	Received time.Time
+	Msg      *dns.Msg
+}
+
+// exchanges encapsulates miekg/dns usage.
 func (r *BaseResolver) exchanges() {
-	msgs := make(chan *dns.Msg, 2000)
+	msgs := make(chan *message, 2000)
 
 	go r.readMessages(msgs, false)
 	go r.readMessages(msgs, true)
@@ -400,7 +516,7 @@ func (r *BaseResolver) exchanges() {
 			go r.rotateConnections()
 		case read := <-msgs:
 			go r.processMessage(read)
-		case req := <-r.XchgChan:
+		case req := <-r.xchgChan:
 			go r.writeMessage(req)
 		}
 	}
@@ -423,7 +539,7 @@ func (r *BaseResolver) writeMessage(req *resolveRequest) {
 	r.updateAttempts()
 }
 
-func (r *BaseResolver) readMessages(msgs chan *dns.Msg, last bool) {
+func (r *BaseResolver) readMessages(msgs chan *message, last bool) {
 loop:
 	for {
 		select {
@@ -444,7 +560,10 @@ loop:
 
 			co.SetReadDeadline(time.Now().Add(r.WindowDuration))
 			if read, err := co.ReadMsg(); err == nil && read != nil {
-				msgs <- read
+				msgs <- &message{
+					Received: time.Now(),
+					Msg:      read,
+				}
 			}
 		}
 	}
@@ -454,10 +573,10 @@ func (r *BaseResolver) tcpExchange(req *resolveRequest) {
 	msg := queryMessage(r.getID(), req.Name, req.Qtype)
 	d := net.Dialer{Timeout: r.WindowDuration}
 
-	conn, err := d.Dial("tcp", r.Address+":"+r.Port)
+	conn, err := d.Dial("tcp", r.address+":"+r.port)
 	if err != nil {
 		r.pullRequest(msg.MsgHdr.Id)
-		estr := fmt.Sprintf("DNS: Failed to obtain TCP connection to %s: %v", r.Address+":"+r.Port, err)
+		estr := fmt.Sprintf("DNS: Failed to obtain TCP connection to %s:%s: %v", r.address, r.port, err)
 		r.returnRequest(req, makeResolveResult(nil, true, estr, 100))
 		return
 	}
@@ -483,39 +602,42 @@ func (r *BaseResolver) tcpExchange(req *resolveRequest) {
 		return
 	}
 
-	r.processMessage(read)
+	r.processMessage(&message{
+		Received: time.Now(),
+		Msg:      read,
+	})
 }
 
-func (r *BaseResolver) processMessage(msg *dns.Msg) {
-	req := r.pullRequest(msg.MsgHdr.Id)
+func (r *BaseResolver) processMessage(m *message) {
+	req := r.pullRequest(m.Msg.MsgHdr.Id)
 	if req == nil {
 		return
 	}
 
-	r.updateRTT(time.Now().Sub(req.Timestamp))
-	r.updateStats(msg.Rcode)
+	r.updateRTT(m.Received.Sub(req.Timestamp))
+	r.updateStats(m.Msg.Rcode)
 	// Check that the query was successful
-	if msg.Rcode != dns.RcodeSuccess {
+	if m.Msg.Rcode != dns.RcodeSuccess {
 		var again bool
 		for _, code := range retryCodes {
-			if msg.Rcode == code {
+			if m.Msg.Rcode == code {
 				again = true
 				break
 			}
 		}
 		estr := fmt.Sprintf("DNS query on resolver %s, for %s type %d returned error %s",
-			r.Address, req.Name, req.Qtype, dns.RcodeToString[msg.Rcode])
-		r.returnRequest(req, makeResolveResult(nil, again, estr, msg.Rcode))
+			r.address, req.Name, req.Qtype, dns.RcodeToString[m.Msg.Rcode])
+		r.returnRequest(req, makeResolveResult(nil, again, estr, m.Msg.Rcode))
 		return
 	}
 
-	if msg.Truncated {
+	if m.Msg.Truncated {
 		go r.tcpExchange(req)
 		return
 	}
 
 	var answers []requests.DNSAnswer
-	for _, a := range extractRawData(msg, req.Qtype) {
+	for _, a := range extractRawData(m.Msg, req.Qtype) {
 		answers = append(answers, requests.DNSAnswer{
 			Name: req.Name,
 			Type: int(req.Qtype),
@@ -526,8 +648,8 @@ func (r *BaseResolver) processMessage(msg *dns.Msg) {
 
 	if len(answers) == 0 {
 		estr := fmt.Sprintf("DNS query on resolver %s, for %s type %d returned 0 records",
-			r.Address, req.Name, req.Qtype)
-		r.returnRequest(req, makeResolveResult(nil, false, estr, msg.Rcode))
+			r.address, req.Name, req.Qtype)
+		r.returnRequest(req, makeResolveResult(nil, false, estr, m.Msg.Rcode))
 		return
 	}
 

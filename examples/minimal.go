@@ -5,14 +5,21 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/OWASP/Amass/config"
 	"github.com/OWASP/Amass/enum"
+	"github.com/OWASP/Amass/services"
 )
 
 func main() {
 	// Seed the default pseudo-random number generator
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	e := enum.NewEnumeration()
+	sys, err := services.NewLocalSystem(config.NewConfig())
+	if err != nil {
+		return
+	}
+
+	e := enum.NewEnumeration(sys)
 	if e == nil {
 		return
 	}

@@ -3,7 +3,7 @@
 
 package stringfilter
 
-import "github.com/TheTannerRyan/ring"
+import "github.com/thetannerryan/ring"
 
 // StringFilter implements an object that performs filtering of strings
 // to ensure that only unique items get through the filter.
@@ -13,7 +13,7 @@ type StringFilter struct {
 
 // NewStringFilter returns an initialized StringFilter.
 func NewStringFilter() *StringFilter {
-	r, err := ring.Init(1000000, 0.001)
+	r, err := ring.Init(100000000, 0.001)
 	if err != nil {
 		return nil
 	}
