@@ -11,10 +11,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/OWASP/Amass/config"
-	"github.com/OWASP/Amass/eventbus"
-	"github.com/OWASP/Amass/net/http"
-	"github.com/OWASP/Amass/requests"
+	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/eventbus"
+	"github.com/OWASP/Amass/v3/net/http"
+	"github.com/OWASP/Amass/v3/requests"
 )
 
 // Baidu is the Service that handles access to the Baidu data source.
@@ -84,7 +84,7 @@ func (b *Baidu) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 				bus.Publish(requests.NewNameTopic, &requests.DNSRequest{
 					Name:   cleanName(sd),
 					Domain: req.Domain,
-					Tag:    b.SourceType,
+					Tag:    b.Type(),
 					Source: b.String(),
 				})
 			}
@@ -116,7 +116,7 @@ func (b *Baidu) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 			bus.Publish(requests.NewNameTopic, &requests.DNSRequest{
 				Name:   element.Domain,
 				Domain: d,
-				Tag:    b.SourceType,
+				Tag:    b.Type(),
 				Source: b.String(),
 			})
 		}

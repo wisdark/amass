@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OWASP/Amass/config"
-	"github.com/OWASP/Amass/net/http"
-	"github.com/OWASP/Amass/requests"
-	"github.com/OWASP/Amass/semaphore"
-	"github.com/OWASP/Amass/stringset"
+	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/net/http"
+	"github.com/OWASP/Amass/v3/requests"
+	"github.com/OWASP/Amass/v3/semaphore"
+	"github.com/OWASP/Amass/v3/stringset"
 	"github.com/PuerkitoBio/goquery"
 	"github.com/geziyor/geziyor"
 	"github.com/geziyor/geziyor/client"
@@ -50,6 +50,7 @@ func GetAllSources(sys System) []Service {
 		NewDogpile(sys),
 		NewEntrust(sys),
 		NewExalead(sys),
+		NewGitHub(sys),
 		NewGoogle(sys),
 		NewGoogleCT(sys),
 		NewHackerOne(sys),

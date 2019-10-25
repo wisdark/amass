@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/OWASP/Amass/net"
-	"github.com/OWASP/Amass/requests"
+	"github.com/OWASP/Amass/v3/net"
+	"github.com/OWASP/Amass/v3/requests"
 	"github.com/fatih/color"
 )
 
@@ -31,7 +31,7 @@ const Banner = `
 
 const (
 	// Version is used to display the current version of Amass.
-	Version = "v3.2.1"
+	Version = "v3.2.2"
 
 	// Author is used to display the Amass Project Team.
 	Author = "OWASP Amass Project - @owaspamass"
