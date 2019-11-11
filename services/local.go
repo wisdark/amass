@@ -10,8 +10,9 @@ import (
 
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/graph"
+	"github.com/OWASP/Amass/v3/graph/db"
 	"github.com/OWASP/Amass/v3/resolvers"
-	sf "github.com/OWASP/Amass/v3/stringfilter"
+	"github.com/OWASP/Amass/v3/stringset"
 )
 
 // LocalSystem implements a System to be executed within a single process.
@@ -20,7 +21,7 @@ type LocalSystem struct {
 
 	cfg    *config.Config
 	pool   resolvers.Resolver
-	graphs []graph.DataHandler
+	graphs []*graph.Graph
 
 	// The various services running within the system
 	coreSrvs    []Service
@@ -118,7 +119,7 @@ func (l *LocalSystem) CoreServices() []Service {
 }
 
 // GraphDatabases implements the System interface.
-func (l *LocalSystem) GraphDatabases() []graph.DataHandler {
+func (l *LocalSystem) GraphDatabases() []*graph.Graph {
 	return l.graphs
 }
 
@@ -158,22 +159,21 @@ func (l *LocalSystem) GetAllSourceNames() []string {
 // Select the graph that will store the System findings.
 func (l *LocalSystem) setupGraphDBs() error {
 	if l.Config().GremlinURL != "" {
-		gremlin := graph.NewGremlin(l.Config().GremlinURL,
+		/*gremlin := graph.NewGremlin(l.Config().GremlinURL,
 			l.Config().GremlinUser, l.Config().GremlinPass, l.Config().Log)
-		l.graphs = append(l.graphs, gremlin)
-		return nil
+		l.graphs = append(l.graphs, gremlin)*/
 	}
 
-	g := graph.NewGraph(l.Config().Dir)
+	g := graph.NewGraph(db.NewCayleyGraph(l.Config().Dir))
 	if g == nil {
 		return errors.New("Failed to create the graph")
 	}
 	l.graphs = append(l.graphs, g)
-
-	if l.Config().DataOptsWriter != nil {
-		l.graphs = append(l.graphs,
-			graph.NewDataOptsHandler(l.Config().DataOptsWriter))
-	}
+	/*
+		if l.Config().DataOptsWriter != nil {
+			l.graphs = append(l.graphs,
+				graph.NewDataOptsHandler(l.Config().DataOptsWriter))
+		}*/
 	return nil
 }
 
@@ -195,7 +195,7 @@ func (l *LocalSystem) initCoreServices() error {
 }
 
 func (l *LocalSystem) periodicChecks() {
-	filter := sf.NewStringFilter()
+	filter := stringset.NewStringFilter()
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 
@@ -209,7 +209,7 @@ func (l *LocalSystem) periodicChecks() {
 	}
 }
 
-func (l *LocalSystem) checkTheResolvers(filter *sf.StringFilter) {
+func (l *LocalSystem) checkTheResolvers(filter *stringset.StringFilter) {
 	pool := l.Pool().(*resolvers.ResolverPool)
 
 	for _, resolver := range pool.Resolvers {
