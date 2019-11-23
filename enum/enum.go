@@ -104,6 +104,7 @@ func NewEnumeration(sys services.System) *Enumeration {
 		},
 		bruteQueue:    new(queue.Queue),
 		srcs:          stringset.New(),
+		addrs:         stringset.New(),
 		resolvedQueue: new(queue.Queue),
 		Output:        make(chan *requests.Output, 100),
 		outputQueue:   new(queue.Queue),
@@ -148,8 +149,6 @@ func (e *Enumeration) Done() {
 func (e *Enumeration) Start() error {
 	if e.Output == nil {
 		return errors.New("The enumeration did not have an output channel")
-	} else if e.Config.Passive && e.Config.DataOptsWriter != nil {
-		return errors.New("Data operations cannot be saved without DNS resolution")
 	} else if err := e.Config.CheckSettings(); err != nil {
 		return err
 	}
@@ -182,7 +181,6 @@ func (e *Enumeration) Start() error {
 
 	e.setupEventBus()
 
-	e.addrs = stringset.New()
 	go e.processAddresses()
 
 	// The enumeration will not terminate until all output has been processed
