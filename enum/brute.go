@@ -5,7 +5,6 @@ package enum
 
 import (
 	"strings"
-	"time"
 
 	"github.com/OWASP/Amass/v3/requests"
 	"github.com/OWASP/Amass/v3/stringset"
@@ -35,28 +34,23 @@ func (e *Enumeration) startBruteForcing() {
 		})
 	}
 
-	curIdx := 0
-	maxIdx := 7
-	delays := []int{10, 25, 50, 75, 100, 150, 250, 500}
-loop:
 	for {
 		select {
 		case <-e.done:
 			return
-		default:
-			element, ok := e.bruteQueue.Next()
-			if !ok {
-				time.Sleep(time.Duration(delays[curIdx]) * time.Millisecond)
-				if curIdx < maxIdx {
-					curIdx++
-				}
-				continue loop
-			}
+		case <-e.moreBrute:
+			if element, ok := e.bruteQueue.Next(); ok {
+				req := element.(*requests.DNSRequest)
 
-			curIdx = 0
-			req := element.(*requests.DNSRequest)
-			e.bruteSendNewNames(req)
+				e.bruteSendNewNames(req)
+			}
 		}
+	}
+}
+
+func (e *Enumeration) moreBruteForcing() {
+	if !e.bruteQueue.Empty() {
+		e.moreBrute <- struct{}{}
 	}
 }
 
@@ -90,33 +84,27 @@ func (e *Enumeration) bruteSendNewNames(req *requests.DNSRequest) {
 }
 
 func (e *Enumeration) performAlterations() {
-	curIdx := 0
-	maxIdx := 7
-	delays := []int{10, 25, 50, 75, 100, 150, 250, 500}
-loop:
 	for {
 		select {
 		case <-e.done:
 			return
-		default:
-			element, ok := e.altQueue.Next()
-			if !ok {
-				time.Sleep(time.Duration(delays[curIdx]) * time.Millisecond)
-				if curIdx < maxIdx {
-					curIdx++
+		case <-e.moreAlts:
+			if element, ok := e.altQueue.Next(); ok {
+				req := element.(*requests.DNSRequest)
+
+				if e.Config.IsDomainInScope(req.Name) &&
+					(len(strings.Split(req.Name, ".")) > len(strings.Split(req.Domain, "."))) {
+					go e.executeAlts(req)
+					go e.useMarkovModel(req)
 				}
-				continue loop
-			}
-
-			curIdx = 0
-			req := element.(*requests.DNSRequest)
-
-			if e.Config.IsDomainInScope(req.Name) &&
-				(len(strings.Split(req.Name, ".")) > len(strings.Split(req.Domain, "."))) {
-				go e.executeAlts(req)
-				go e.useMarkovModel(req)
 			}
 		}
+	}
+}
+
+func (e *Enumeration) moreAlterations() {
+	if !e.altQueue.Empty() {
+		e.moreAlts <- struct{}{}
 	}
 }
 

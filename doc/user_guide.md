@@ -207,6 +207,18 @@ If you decide to use an Amass configuration file, it will be automatically disco
 
 You will need a config file to use your API keys with Amass. See the [Example Configuration File](https://github.com/OWASP/Amass/blob/master/examples/config.ini) for more details.
 
+Amass automatically tries to discover the configuration file in the following locations:
+
+| Operating System | Path |
+| ---------------- | ---- |
+| Linux / Unix | `$XDG_CONFIG_HOME/amass/config.ini` or `$HOME/.config/amass/config.ini` |
+| Windows | `%AppData%\amass\config.ini` |
+| OSX | `$HOME/Library/Application Support/amass/config.ini` |
+
+These are good places for you to put your configuration file.
+
+Note that these locations are based on the [output directory](#the-output-directory). If you use the `-dir` flag, the location where Amass will try to discover the configuration file will change. For example, if you pass in `-dir ./my-out-dir`, Amass will try to discover a configuration file in `./my-out-dir/config.ini`.
+
 ### Default Section
 
 | Option | Description |
@@ -326,31 +338,49 @@ amass viz -maltego
 If you are using the amass package within your own Go code, be sure to properly seed the default pseudo-random number generator:
 
 ```go
-import(
-    "fmt"
-    "math/rand"
-    "time"
+package main
 
-    "github.com/OWASP/Amass/enum"
+import (
+	"fmt"
+	"math/rand"
+	"time"
+
+	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/enum"
+	"github.com/OWASP/Amass/v3/services"
 )
 
 func main() {
-    // Seed the default pseudo-random number generator
-    rand.Seed(time.Now().UTC().UnixNano())
+	// Seed the default pseudo-random number generator
+	rand.Seed(time.Now().UTC().UnixNano())
 
-    e := enum.NewEnumeration()
-    if e == nil {
-        return
-    }
+	sys, err := services.NewLocalSystem(config.NewConfig())
+	if err != nil {
+		return
+	}
 
-    go func() {
-        for result := range e.Output {
-            fmt.Println(result.Name)
-        }
-    }()
+	e := enum.NewEnumeration(sys)
+	if e == nil {
+		return
+	}
 
-    // Setup the most basic amass configuration
-    e.Config.AddDomain("example.com")
-    e.Start()
+	go func() {
+		for result := range e.Output {
+			fmt.Println(result.Name)
+		}
+	}()
+
+	// Setup the most basic amass configuration
+	e.Config.AddDomain("example.com")
+	e.Start()
 }
+```
+
+In case you get an error saying "Failed to create the graph", try changing the output directory in the config:
+
+```go
+cfg := config.NewConfig()
+cfg.Dir = "/tmp"
+
+sys, err := services.NewLocalSystem(cfg)
 ```
