@@ -1,6 +1,9 @@
 
 # [![OWASP Logo](https://github.com/OWASP/Amass/blob/master/images/owasp_logo.png) OWASP Amass](https://www.owasp.org/index.php/OWASP_Amass_Project) - Installation Guide
 
+[![Packaging status](https://repology.org/badge/vertical-allrepos/amass.svg)](https://repology.org/metapackage/amass/versions)
+[![Get it from the Snap Store](https://snapcraft.io/static/images/badges/en/snap-store-white.svg)](https://snapcraft.io/amass)
+
 ## Prebuilt Binaries
 
 A [precompiled version is available](https://github.com/OWASP/Amass/releases) with each release.
@@ -10,32 +13,44 @@ A [precompiled version is available](https://github.com/OWASP/Amass/releases) wi
 1. Build the [Docker](https://docs.docker.com/) image:
 
 ```bash
-sudo docker build -t amass https://github.com/OWASP/Amass.git
+docker build -t amass https://github.com/OWASP/Amass.git
 ```
 
 2. Run the Docker image:
 
 ```bash
-sudo docker run amass --passive -d example.com
+docker run -v OUTPUT_DIR_PATH:/.config/amass/ amass enum --list
 ```
 
-The wordlists maintained in the Amass git repository are available in `/wordlists/` within the docker container. For example, to use `all.txt`:
+The volume argument allows the Amass graph database to persist between executions and output files to be accessed on the host system. The first field (left of the colon) of the volume option is the amass output directory that is external to Docker, while the second field is the path, internal to Docker, where amass will write the output files.
+
+The wordlists maintained in the Amass git repository are available in `/examples/wordlists/` within the docker container. For example, to use `all.txt`:
 
 ```bash
-sudo docker run amass -w /wordlists/all.txt -d example.com
+docker run -v OUTPUT_DIR_PATH:/.config/amass/ amass enum -brute -w /wordlists/all.txt -d example.com
 ```
 
 ## From Source
 
-If you prefer to build your own binary from the latest release of the source code, make sure you have a correctly configured **Go >= 1.10** environment. More information about how to achieve this can be found [on the golang website.](https://golang.org/doc/install) Then, take the following steps:
+If you prefer to build your own binary from the latest release of the source code, make sure you have a correctly configured **Go >= 1.13** environment. More information about how to achieve this can be found [on the golang website.](https://golang.org/doc/install).
 
-1. Download OWASP Amass:
+Simply execute the following commands:
+
+1. Turn on support for Go Modules to ensure the correct dependency versions are used:
 
 ```bash
-go get -u github.com/OWASP/Amass/...
+export GO111MODULE=on
 ```
 
-2. If you wish to rebuild the binaries from the source code:
+2. Download OWASP Amass:
+
+```bash
+go get -v -u github.com/OWASP/Amass/v3/...
+```
+
+At this point, the binary should be in *$GOPATH/bin*.
+
+3. If you'd like to rebuild the binary from the project source code:
 
 ```bash
 cd $GOPATH/src/github.com/OWASP/Amass
@@ -43,19 +58,17 @@ cd $GOPATH/src/github.com/OWASP/Amass
 go install ./...
 ```
 
-At this point, the binaries should be in *$GOPATH/bin*.
-
-3. Several wordlists can be found in the following directory:
+Several wordlists for performing DNS name alterations and brute forcing can be found in the following directory:
 
 ```bash
-ls $GOPATH/src/github.com/OWASP/Amass/wordlists/
+ls $GOPATH/src/github.com/OWASP/Amass/examples/wordlists/
 ```
 
 ## Packages Maintained by the Amass Project
 
-### Homebrew (macOS)
+### Homebrew
 
-For **Homebrew** on **Mac**, the following two commands will install Amass into your macOS environment:
+For **Homebrew**, the following two commands will install Amass into your environment:
 
 ```bash
 brew tap caffix/amass
@@ -70,16 +83,6 @@ If your operating environment supports [Snap](https://docs.snapcraft.io/core/ins
 sudo snap install amass
 ```
 
-On **Kali**, follow these steps to install Snap and Amass + use AppArmor (for autoload):
-
-```bash
-sudo apt install snapd
-sudo systemctl start snapd
-sudo systemctl enable snapd
-sudo systemctl start apparmor
-sudo systemctl enable apparmor
-```
-
 Add the Snap bin directory to your PATH:
 
 ```bash
@@ -92,7 +95,7 @@ Periodically, execute the following command to update all your snap packages:
 sudo snap refresh
 ```
 
-## Packages Maintained by a Third-party
+## Packages Maintained by a Third Party
 
 ### Arch Linux
 
@@ -102,6 +105,13 @@ Details regarding this package can be found [here](https://aur.archlinux.org/pac
 
 Details regarding this package can be found [here](https://github.com/BlackArch/blackarch/blob/master/packages/amass/PKGBUILD)
 
+### DragonFly BSD
+
+```bash
+pkg upgrade
+pkg install amass
+```
+
 ### FreeBSD
 
 ```bash
@@ -109,10 +119,24 @@ cd /usr/ports/dns/amass/ && make install clean
 pkg install amass
 ```
 
+### Kali Linux
+
+```bash
+apt-get update
+apt-get install amass
+```
+
 ## Nix or NixOS
 
 ```bash
 nix-env -f '<nixpkgs>' -iA amass
+```
+
+### Parrot Linux
+
+```bash
+apt-get update
+apt-get install amass
 ```
 
 ### Pentoo Linux

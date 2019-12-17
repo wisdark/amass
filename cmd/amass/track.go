@@ -11,9 +11,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/OWASP/Amass/amass/core"
-	"github.com/OWASP/Amass/amass/handlers"
-	"github.com/OWASP/Amass/amass/utils"
+	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/graph"
+	"github.com/OWASP/Amass/v3/requests"
+	"github.com/OWASP/Amass/v3/stringset"
 	"github.com/fatih/color"
 )
 
@@ -23,7 +24,7 @@ const (
 )
 
 type trackArgs struct {
-	Domains utils.ParseStrings
+	Domains stringset.Set
 	Last    int
 	Since   string
 	Options struct {
@@ -39,7 +40,9 @@ type trackArgs struct {
 func runTrackCommand(clArgs []string) {
 	var args trackArgs
 	var help1, help2 bool
-	trackCommand := flag.NewFlagSet("track", flag.ExitOnError)
+	trackCommand := flag.NewFlagSet("track", flag.ContinueOnError)
+
+	args.Domains = stringset.New()
 
 	trackBuf := new(bytes.Buffer)
 	trackCommand.SetOutput(trackBuf)
@@ -78,12 +81,12 @@ func runTrackCommand(clArgs []string) {
 		os.Exit(1)
 	}
 	if args.Filepaths.Domains != "" {
-		list, err := core.GetListFromFile(args.Filepaths.Domains)
+		list, err := config.GetListFromFile(args.Filepaths.Domains)
 		if err != nil {
 			r.Fprintf(color.Error, "Failed to parse the domain names file: %v\n", err)
 			os.Exit(1)
 		}
-		args.Domains = utils.UniqueAppend(args.Domains, list...)
+		args.Domains.InsertMany(list...)
 	}
 	if len(args.Domains) == 0 {
 		r.Fprintln(color.Error, "No root domain names were provided")
@@ -102,19 +105,22 @@ func runTrackCommand(clArgs []string) {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	config := new(core.Config)
+	cfg := new(config.Config)
 	// Check if a configuration file was provided, and if so, load the settings
-	if acquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, config) {
+	if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
 		if args.Filepaths.Directory == "" {
-			args.Filepaths.Directory = config.Dir
+			args.Filepaths.Directory = cfg.Dir
 		}
 		if len(args.Domains) == 0 {
-			args.Domains = utils.UniqueAppend(args.Domains, config.Domains()...)
+			args.Domains.InsertMany(cfg.Domains()...)
 		}
+	} else if args.Filepaths.ConfigFile != "" {
+		r.Fprintf(color.Error, "Failed to load the configuration file: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Connect with the graph database containing the enumeration data
-	db := openGraphDatabase(args.Filepaths.Directory, config)
+	db := openGraphDatabase(args.Filepaths.Directory, cfg)
 	if db == nil {
 		r.Fprintln(color.Error, "Failed to connect with the database")
 		os.Exit(1)
@@ -122,7 +128,7 @@ func runTrackCommand(clArgs []string) {
 	defer db.Close()
 
 	// Obtain the enumerations that include the provided domain(s)
-	enums := enumIDs(args.Domains, db)
+	enums := enumIDs(args.Domains.Slice(), db)
 
 	// There needs to be at least two enumerations to proceed
 	if len(enums) < 2 {
@@ -138,7 +144,7 @@ func runTrackCommand(clArgs []string) {
 	enums, earliest, latest := orderedEnumsAndDateRanges(enums, db)
 	// Filter out enumerations that begin before the start date/time
 	if args.Since != "" {
-		for i := len(enums)-1; i >= 0; i-- {
+		for i := len(enums) - 1; i >= 0; i-- {
 			if !earliest[i].Before(start) {
 				break
 			}
@@ -157,17 +163,17 @@ func runTrackCommand(clArgs []string) {
 	latest = latest[:end]
 
 	if args.Options.History {
-		completeHistoryOutput(args.Domains, enums, earliest, latest, db)
+		completeHistoryOutput(args.Domains.Slice(), enums, earliest, latest, db)
 		return
 	}
-	cumulativeOutput(args.Domains, enums, earliest, latest, db)
+	cumulativeOutput(args.Domains.Slice(), enums, earliest, latest, db)
 }
 
-func cumulativeOutput(domains []string, enums []string, ea, la []time.Time, db handlers.DataHandler) {
+func cumulativeOutput(domains []string, enums []string, ea, la []time.Time, db *graph.Graph) {
 	idx := len(enums) - 1
-	filter := utils.NewStringFilter()
+	filter := stringset.NewStringFilter()
 
-	var cum []*core.Output
+	var cum []*requests.Output
 	for i := idx - 1; i >= 0; i-- {
 		for _, out := range getUniqueDBOutput(enums[i], domains, db) {
 			if domainNameInScope(out.Name, domains) && !filter.Duplicate(out.Name) {
@@ -193,7 +199,7 @@ func cumulativeOutput(domains []string, enums []string, ea, la []time.Time, db h
 	}
 }
 
-func completeHistoryOutput(domains []string, enums []string, ea, la []time.Time, db handlers.DataHandler) {
+func completeHistoryOutput(domains []string, enums []string, ea, la []time.Time, db *graph.Graph) {
 	var prev string
 
 	for i, enum := range enums {
@@ -232,9 +238,9 @@ func blueLine() {
 	fmt.Println()
 }
 
-func diffEnumOutput(out1, out2 []*core.Output) []string {
-	omap1 := make(map[string]*core.Output)
-	omap2 := make(map[string]*core.Output)
+func diffEnumOutput(out1, out2 []*requests.Output) []string {
+	omap1 := make(map[string]*requests.Output)
+	omap2 := make(map[string]*requests.Output)
 
 	for _, o := range out1 {
 		omap1[o.Name] = o
@@ -249,7 +255,7 @@ func diffEnumOutput(out1, out2 []*core.Output) []string {
 		handled[o.Name] = struct{}{}
 
 		if _, found := omap2[o.Name]; !found {
-			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Removed: "),
+			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Found: "),
 				green(o.Name), yellow(lineOfAddresses(o.Addresses))))
 			continue
 		}
@@ -257,8 +263,8 @@ func diffEnumOutput(out1, out2 []*core.Output) []string {
 		o2 := omap2[o.Name]
 		if !compareAddresses(o.Addresses, o2.Addresses) {
 			diff = append(diff, fmt.Sprintf("%s%s\n\t%s\t%s\n\t%s\t%s", blue("Moved: "),
-				green(o.Name), blue(" from "), yellow(lineOfAddresses(o.Addresses)),
-				blue(" to "), yellow(lineOfAddresses(o2.Addresses))))
+				green(o.Name), blue(" from "), yellow(lineOfAddresses(o2.Addresses)),
+				blue(" to "), yellow(lineOfAddresses(o.Addresses))))
 		}
 	}
 
@@ -268,14 +274,14 @@ func diffEnumOutput(out1, out2 []*core.Output) []string {
 		}
 
 		if _, found := omap1[o.Name]; !found {
-			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Found: "),
+			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Removed: "),
 				green(o.Name), yellow(lineOfAddresses(o.Addresses))))
 		}
 	}
 	return diff
 }
 
-func lineOfAddresses(addrs []core.AddressInfo) string {
+func lineOfAddresses(addrs []requests.AddressInfo) string {
 	var line string
 
 	for i, addr := range addrs {
@@ -287,7 +293,7 @@ func lineOfAddresses(addrs []core.AddressInfo) string {
 	return line
 }
 
-func compareAddresses(addr1, addr2 []core.AddressInfo) bool {
+func compareAddresses(addr1, addr2 []requests.AddressInfo) bool {
 	for _, a1 := range addr1 {
 		var found bool
 
