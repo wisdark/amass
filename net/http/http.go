@@ -22,7 +22,6 @@ import (
 
 	"github.com/OWASP/Amass/v3/net/dns"
 	"github.com/OWASP/Amass/v3/stringset"
-	"github.com/caffix/cloudflare-roundtripper/cfrt"
 )
 
 const (
@@ -61,7 +60,6 @@ func init() {
 		},
 		Jar: jar,
 	}
-	defaultClient.Transport, _ = cfrt.New(defaultClient.Transport)
 }
 
 // CopyCookies copies cookies from one domain to another. Some of our data
@@ -118,7 +116,7 @@ func RequestWebPage(urlstring string, body io.Reader, hvals map[string]string, u
 
 	in, err := ioutil.ReadAll(resp.Body)
 	resp.Body.Close()
-	return string(in), nil
+	return string(in), err
 }
 
 // PullCertificateNames attempts to pull a cert from one or more ports on an IP.
