@@ -5,43 +5,45 @@ package enum
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/eventbus"
+	"github.com/OWASP/Amass/v3/graph"
+	"github.com/OWASP/Amass/v3/graphdb"
 	"github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/queue"
 	"github.com/OWASP/Amass/v3/requests"
 	"github.com/OWASP/Amass/v3/resolvers"
-	"github.com/OWASP/Amass/v3/services"
 	"github.com/OWASP/Amass/v3/stringfilter"
 	"github.com/OWASP/Amass/v3/stringset"
+	"github.com/OWASP/Amass/v3/systems"
 )
 
-var filterMaxSize int64 = 1 << 25
+var filterMaxSize int64 = 1 << 24
 
 // Enumeration is the object type used to execute a DNS enumeration with Amass.
 type Enumeration struct {
 	// Information sent in the context
-	Config *config.Config
-	Bus    *eventbus.EventBus
-	Sys    services.System
+	Config     *config.Config
+	Bus        *eventbus.EventBus
+	Sys        systems.System
+	Graph      *graph.Graph
+	closedOnce sync.Once
 
 	ctx context.Context
 
-	coreSrvs []services.Service
-	dataMgr  services.Service
+	dnsMgr       requests.Service
+	dataMgr      requests.Service
+	dataMgrEmpty bool
+	dataMgrLock  sync.Mutex
 
 	srcsLock sync.Mutex
 	srcs     stringset.Set
 
-	// The channel and queue that will receive the results
-	Output         chan *requests.Output
-	outputQueue    *queue.Queue
-	outputFilter   stringfilter.Filter
+	// The filter for new outgoing DNS queries
 	resFilter      stringfilter.Filter
 	resFilterCount int64
 
@@ -49,8 +51,8 @@ type Enumeration struct {
 	logQueue *queue.Queue
 
 	// Broadcast channel that indicates no further writes to the output channel
-	done   chan struct{}
-	closed sync.Once
+	done     chan struct{}
+	doneOnce sync.Once
 
 	// Cache for the infrastructure data collected from online sources
 	netCache *net.ASNCache
@@ -77,54 +79,58 @@ type Enumeration struct {
 }
 
 // NewEnumeration returns an initialized Enumeration that has not been started yet.
-func NewEnumeration(sys services.System) *Enumeration {
+func NewEnumeration(cfg *config.Config, sys systems.System) *Enumeration {
 	e := &Enumeration{
-		Config:         config.NewConfig(),
-		Bus:            eventbus.NewEventBus(10000),
+		Config:         cfg,
 		Sys:            sys,
-		coreSrvs:       sys.CoreServices(),
+		Bus:            eventbus.NewEventBus(100000),
+		Graph:          graph.NewGraph(graphdb.NewCayleyGraphMemory()),
 		srcs:           stringset.New(),
-		Output:         make(chan *requests.Output, 1000),
-		outputQueue:    new(queue.Queue),
-		outputFilter:   stringfilter.NewBloomFilter(filterMaxSize),
 		resFilter:      stringfilter.NewBloomFilter(filterMaxSize),
 		logQueue:       new(queue.Queue),
 		done:           make(chan struct{}),
 		netCache:       net.NewASNCache(),
 		resolvedFilter: stringfilter.NewBloomFilter(filterMaxSize),
 		last:           time.Now(),
+		dataMgrEmpty:   true,
 		perSecFirst:    time.Now(),
 		perSecLast:     time.Now(),
 	}
 
-	if ref := e.refToDataManager(); ref != nil {
-		e.dataMgr = ref
+	if cfg.Passive {
 		return e
 	}
-	return nil
+
+	e.dataMgr = NewDataManagerService(sys, e.Graph)
+	if err := e.dataMgr.Start(); err != nil {
+		return nil
+	}
+
+	e.dnsMgr = NewDNSService(sys)
+	if err := e.dnsMgr.Start(); err != nil {
+		return nil
+	}
+
+	return e
 }
 
-func (e *Enumeration) refToDataManager() services.Service {
-	for _, srv := range e.Sys.CoreServices() {
-		if srv.String() == "Data Manager" {
-			return srv
-		}
-	}
-	return nil
+// Close cleans up resources instantiated by the Enumeration.
+func (e *Enumeration) Close() {
+	e.closedOnce.Do(func() {
+		e.Graph.Close()
+	})
 }
 
 // Done safely closes the done broadcast channel.
 func (e *Enumeration) Done() {
-	e.closed.Do(func() {
+	e.doneOnce.Do(func() {
 		close(e.done)
 	})
 }
 
 // Start begins the vertical domain correlation process for the Enumeration object.
 func (e *Enumeration) Start() error {
-	if e.Output == nil {
-		return errors.New("The enumeration did not have an output channel")
-	} else if err := e.Config.CheckSettings(); err != nil {
+	if err := e.Config.CheckSettings(); err != nil {
 		return err
 	}
 
@@ -289,8 +295,6 @@ func (e *Enumeration) Start() error {
 	 * These events are important to the engine in order to receive output, logs,
 	 * notices about service activity, and notices about DNS query completion
 	 */
-	e.Bus.Subscribe(requests.OutputTopic, e.sendOutput)
-	defer e.Bus.Unsubscribe(requests.OutputTopic, e.sendOutput)
 	e.Bus.Subscribe(requests.LogTopic, e.queueLog)
 	defer e.Bus.Unsubscribe(requests.LogTopic, e.queueLog)
 	e.Bus.Subscribe(requests.SetActiveTopic, e.updateLastActive)
@@ -298,28 +302,12 @@ func (e *Enumeration) Start() error {
 	e.Bus.Subscribe(requests.ResolveCompleted, e.incQueriesPerSec)
 	defer e.Bus.Unsubscribe(requests.ResolveCompleted, e.incQueriesPerSec)
 
-	// Setup all core services to receive the appropriate events
-register:
-	for _, srv := range e.Sys.CoreServices() {
-		switch srv.String() {
-		case "Data Manager":
-			// All requests to the data manager will be sent directly
-			continue register
-		case "DNS Service":
-			e.Bus.Subscribe(requests.ResolveNameTopic, srv.DNSRequest)
-			defer e.Bus.Unsubscribe(requests.ResolveNameTopic, srv.DNSRequest)
-			e.Bus.Subscribe(requests.SubDiscoveredTopic, srv.SubdomainDiscovered)
-			defer e.Bus.Unsubscribe(requests.SubDiscoveredTopic, srv.SubdomainDiscovered)
-		default:
-			e.Bus.Subscribe(requests.NameRequestTopic, srv.DNSRequest)
-			defer e.Bus.Unsubscribe(requests.NameRequestTopic, srv.DNSRequest)
-			e.Bus.Subscribe(requests.SubDiscoveredTopic, srv.SubdomainDiscovered)
-			defer e.Bus.Unsubscribe(requests.SubDiscoveredTopic, srv.SubdomainDiscovered)
-			e.Bus.Subscribe(requests.AddrRequestTopic, srv.AddrRequest)
-			defer e.Bus.Unsubscribe(requests.AddrRequestTopic, srv.AddrRequest)
-			e.Bus.Subscribe(requests.ASNRequestTopic, srv.ASNRequest)
-			defer e.Bus.Unsubscribe(requests.ASNRequestTopic, srv.ASNRequest)
-		}
+	// Setup the DNS Service to receive the appropriate events
+	if !e.Config.Passive {
+		e.Bus.Subscribe(requests.ResolveNameTopic, e.dnsMgr.DNSRequest)
+		defer e.Bus.Unsubscribe(requests.ResolveNameTopic, e.dnsMgr.DNSRequest)
+		e.Bus.Subscribe(requests.SubDiscoveredTopic, e.dnsMgr.SubdomainDiscovered)
+		defer e.Bus.Unsubscribe(requests.SubDiscoveredTopic, e.dnsMgr.SubdomainDiscovered)
 	}
 
 	// If a timeout was provided in the configuration, it will go off that
@@ -330,9 +318,6 @@ register:
 			e.Done()
 		})
 	}
-
-	endChan := make(chan struct{})
-	go e.processOutput(endChan)
 
 	secDelay := 5
 	t := time.NewTimer(time.Duration(secDelay) * time.Second)
@@ -345,8 +330,15 @@ loop:
 			break loop
 		case <-t.C:
 			num := e.useManagers(secDelay)
+
+			var inactive bool
+			e.dataMgrLock.Lock()
+			empty := e.dataMgrEmpty
+			e.dataMgrLock.Unlock()
 			// Has the enumeration been inactive long enough to stop the task?
-			inactive := time.Now().Sub(e.lastActive()) > 15*time.Second
+			if empty {
+				inactive = time.Now().Sub(e.lastActive()) > 15*time.Second
+			}
 
 			if num == 0 {
 				if inactive {
@@ -371,14 +363,28 @@ loop:
 
 				e.Config.Log.Printf("Average DNS queries performed: %d/sec, Average retries required: %.2f%%", sec, pct)
 				e.clearPerSec()
+				go e.isDataManagerQueueEmpty()
 			}
 		}
 	}
 
 	cancel()
-	<-endChan
+	if !e.Config.Passive {
+		e.dnsMgr.Stop()
+		e.dataMgr.Stop()
+	}
 	e.writeLogs(true)
+	// Attempt to fix IP address nodes without edges to netblocks
+	e.Graph.HealAddressNodes(e.netCache, e.Config.UUID.String())
 	return nil
+}
+
+func (e *Enumeration) isDataManagerQueueEmpty() {
+	empty := e.dataMgr.RequestLen() == 0
+
+	e.dataMgrLock.Lock()
+	e.dataMgrEmpty = empty
+	e.dataMgrLock.Unlock()
 }
 
 func (e *Enumeration) resolvedDispatcher(req *requests.DNSRequest) {
@@ -392,9 +398,12 @@ func (e *Enumeration) resolvedDispatcher(req *requests.DNSRequest) {
 }
 
 func (e *Enumeration) requiredNumberOfNames(numsec int) int {
-	var required int
-	max := e.Config.MaxDNSQueries * numsec
+	required := 10000
+	if e.Config.Passive {
+		return required
+	}
 
+	max := e.Config.MaxDNSQueries * numsec
 	// Acquire the number of DNS queries already in the queue
 	remaining := e.dnsNamesRemaining()
 	if remaining > 0 {
@@ -413,11 +422,7 @@ func (e *Enumeration) requiredNumberOfNames(numsec int) int {
 }
 
 func (e *Enumeration) useManagers(numsec int) int {
-	required := 100000
-
-	if !e.Config.Passive {
-		required = e.requiredNumberOfNames(numsec)
-	}
+	required := e.requiredNumberOfNames(numsec)
 
 	var count int
 	// Loop through the managers until we acquire the necessary number of names for processing
@@ -454,12 +459,7 @@ func (e *Enumeration) useManagers(numsec int) int {
 			if e.Config.Passive {
 				e.updateLastActive("enum")
 				if e.Config.IsDomainInScope(req.Name) {
-					e.Bus.Publish(requests.OutputTopic, eventbus.PriorityLow, &requests.Output{
-						Name:   req.Name,
-						Domain: req.Domain,
-						Tag:    req.Tag,
-						Source: req.Source,
-					})
+					e.Graph.InsertFQDN(req.Name, req.Source, req.Tag, e.Config.UUID.String())
 				}
 				continue
 			}
@@ -476,16 +476,7 @@ func (e *Enumeration) useManagers(numsec int) int {
 }
 
 func (e *Enumeration) dnsNamesRemaining() int {
-	var remaining int
-
-	for _, srv := range e.coreSrvs {
-		if srv.String() == "DNS Service" {
-			remaining += srv.RequestLen()
-			break
-		}
-	}
-
-	return remaining
+	return e.dnsMgr.RequestLen()
 }
 
 func (e *Enumeration) dnsQueriesPerSec() (int64, int64) {
@@ -546,10 +537,10 @@ func (e *Enumeration) updateLastActive(srv string) {
 	defer e.lastLock.Unlock()
 
 	// Only update active for core services once we run out of new FQDNs
-	if e.numSeqZeros >= 2 {
+	if e.numSeqZeros >= 2 && !e.Config.Passive {
 		var found bool
 
-		for _, s := range e.coreSrvs {
+		for _, s := range []requests.Service{e.dnsMgr, e.dataMgr} {
 			if srv == s.String() {
 				found = true
 				break

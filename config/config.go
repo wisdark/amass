@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2020 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package config
@@ -52,6 +52,9 @@ type Config struct {
 
 	// The directory that stores the bolt db and other files created
 	Dir string `ini:"output_directory"`
+
+	// Use a local graph database
+	LocalDatabase bool
 
 	// The settings for connecting with a Gremlin Server
 	GremlinURL  string
@@ -107,9 +110,6 @@ type Config struct {
 	// Determines if zone transfers will be attempted
 	Active bool
 
-	// Determines if unresolved DNS names will be output by the enumeration
-	IncludeUnresolvable bool `ini:"include_unresolvable"`
-
 	// A blacklist of subdomain names that will not be investigated
 	Blacklist []string
 
@@ -153,16 +153,14 @@ type APIKey struct {
 // NewConfig returns a default configuration object.
 func NewConfig() *Config {
 	c := &Config{
-		UUID:          uuid.New(),
-		Log:           log.New(ioutil.Discard, "", 0),
-		Ports:         []int{443},
-		MaxDNSQueries: defaultConcurrentDNSQueries,
-
-		MinForRecursive: 1,
-
+		UUID:                uuid.New(),
+		Log:                 log.New(ioutil.Discard, "", 0),
+		Ports:               []int{443},
+		MaxDNSQueries:       defaultConcurrentDNSQueries,
+		MinForRecursive:     1,
 		Resolvers:           defaultPublicResolvers,
 		MonitorResolverRate: true,
-
+		LocalDatabase:       true,
 		// The following is enum-only, but intel will just ignore them anyway
 		Alterations:    true,
 		FlipWords:      true,
@@ -477,15 +475,15 @@ func (c *Config) LoadSettings(path string) error {
 
 	// Load up all API key information from data source sections
 	nonAPISections := map[string]struct{}{
-		"network_settings":      struct{}{},
-		"alterations":           struct{}{},
-		"bruteforce":            struct{}{},
-		"default":               struct{}{},
-		"domains":               struct{}{},
-		"resolvers":             struct{}{},
-		"blacklisted":           struct{}{},
-		"disabled_data_sources": struct{}{},
-		"gremlin":               struct{}{},
+		"network_settings":      {},
+		"alterations":           {},
+		"bruteforce":            {},
+		"default":               {},
+		"domains":               {},
+		"resolvers":             {},
+		"blacklisted":           {},
+		"disabled_data_sources": {},
+		"gremlin":               {},
 	}
 
 	for _, section := range cfg.Sections() {
