@@ -1,4 +1,3 @@
-
 # [![OWASP Logo](../images/owasp_logo.png) OWASP Amass](https://owasp.org/www-project-amass/) - Users' Guide
 
 ![Network graph](../images/network_06092018.png "Amass Network Mapping")
@@ -113,7 +112,6 @@ This subcommand will perform DNS enumeration and network mapping while populatin
 | -exclude | Data source names separated by commas to be excluded | amass enum -exclude crtsh -d example.com |
 | -if | Path to a file providing data sources to include | amass enum -if include.txt -d example.com |
 | -include | Data source names separated by commas to be included | amass enum -include crtsh -d example.com |
-| -include-unresolvable | Output DNS names that did not resolve | amass enum -include-unresolvable -d example.com |
 | -ip | Show the IP addresses for discovered names | amass enum -ip -d example.com |
 | -ipv4 | Show the IPv4 addresses for discovered names | amass enum -ipv4 -d example.com |
 | -ipv6 | Show the IPv6 addresses for discovered names | amass enum -ipv6 -d example.com |
