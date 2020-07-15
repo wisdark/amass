@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2020 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package config
@@ -9,6 +9,8 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,7 +24,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const defaultConcurrentDNSQueries = 10000
+const defaultConcurrentDNSQueries = 4000
 
 var defaultPublicResolvers = []string{
 	"1.1.1.1",     // Cloudflare
@@ -52,6 +54,9 @@ type Config struct {
 
 	// The directory that stores the bolt db and other files created
 	Dir string `ini:"output_directory"`
+
+	// Use a local graph database
+	LocalDatabase bool
 
 	// The settings for connecting with a Gremlin Server
 	GremlinURL  string
@@ -107,9 +112,6 @@ type Config struct {
 	// Determines if zone transfers will be attempted
 	Active bool
 
-	// Determines if unresolved DNS names will be output by the enumeration
-	IncludeUnresolvable bool `ini:"include_unresolvable"`
-
 	// A blacklist of subdomain names that will not be investigated
 	Blacklist []string
 
@@ -119,13 +121,18 @@ type Config struct {
 		Sources []string
 	}
 
+	// Type of DNS records to query for
+	RecordTypes []string
+
 	// Resolver settings
 	Resolvers           []string
 	MonitorResolverRate bool
-	ScoreResolvers      bool
 
 	// Enumeration Timeout
 	Timeout int
+
+	// Option for verbose logging and output
+	Verbose bool
 
 	// The root domain names that the enumeration will target
 	domains []string
@@ -148,15 +155,14 @@ type APIKey struct {
 // NewConfig returns a default configuration object.
 func NewConfig() *Config {
 	c := &Config{
-		UUID:          uuid.New(),
-		Log:           log.New(ioutil.Discard, "", 0),
-		Ports:         []int{443},
-		MaxDNSQueries: defaultConcurrentDNSQueries,
-
+		UUID:                uuid.New(),
+		Log:                 log.New(ioutil.Discard, "", 0),
+		Ports:               []int{443},
+		MaxDNSQueries:       defaultConcurrentDNSQueries,
+		MinForRecursive:     1,
 		Resolvers:           defaultPublicResolvers,
 		MonitorResolverRate: true,
-		ScoreResolvers:      true,
-
+		LocalDatabase:       true,
 		// The following is enum-only, but intel will just ignore them anyway
 		Alterations:    true,
 		FlipWords:      true,
@@ -180,7 +186,7 @@ func (c *Config) CheckSettings() error {
 		if c.Passive {
 			return errors.New("Brute forcing cannot be performed without DNS resolution")
 		} else if len(c.Wordlist) == 0 {
-			c.Wordlist, err = getWordlistByBox("namelist.txt")
+			c.Wordlist, err = getWordlistByFS("/namelist.txt")
 			if err != nil {
 				return err
 			}
@@ -191,7 +197,7 @@ func (c *Config) CheckSettings() error {
 	}
 	if c.Alterations {
 		if len(c.AltWordlist) == 0 {
-			c.AltWordlist, err = getWordlistByBox("alterations.txt")
+			c.AltWordlist, err = getWordlistByFS("/alterations.txt")
 			if err != nil {
 				return err
 			}
@@ -339,6 +345,50 @@ func (c *Config) Blacklisted(name string) bool {
 	return resp
 }
 
+// SetResolvers assigns the resolver names provided in the parameter to the list in the configuration.
+func (c *Config) SetResolvers(resolvers []string) {
+	c.Resolvers = []string{}
+
+	for _, r := range resolvers {
+		c.AddResolver(r)
+	}
+}
+
+// AddResolvers appends the resolver names provided in the parameter to the list in the configuration.
+func (c *Config) AddResolvers(resolvers []string) {
+	for _, r := range resolvers {
+		c.AddResolver(r)
+	}
+}
+
+// AddResolver appends the resolver name provided in the parameter to the list in the configuration.
+func (c *Config) AddResolver(resolver string) {
+	c.Lock()
+	defer c.Unlock()
+
+	// Check that the domain string is not empty
+	r := strings.TrimSpace(resolver)
+	if r == "" {
+		return
+	}
+
+	c.Resolvers = stringset.Deduplicate(append(c.Resolvers, resolver))
+	c.calcDNSQueriesSemMax()
+}
+
+func (c *Config) calcDNSQueriesSemMax() {
+	max := (len(c.Resolvers) * 500) / 2
+
+	if max < 500 {
+		max = 500
+	} else if max > 100000 {
+		max = 100000
+	}
+
+	c.SemMaxDNSQueries.Stop()
+	c.SemMaxDNSQueries = semaphore.NewSimpleSemaphore(max)
+}
+
 // AddAPIKey adds the data source and API key association provided to the configuration.
 func (c *Config) AddAPIKey(source string, ak *APIKey) {
 	c.Lock()
@@ -427,15 +477,15 @@ func (c *Config) LoadSettings(path string) error {
 
 	// Load up all API key information from data source sections
 	nonAPISections := map[string]struct{}{
-		"network_settings":      struct{}{},
-		"alterations":           struct{}{},
-		"bruteforce":            struct{}{},
-		"default":               struct{}{},
-		"domains":               struct{}{},
-		"resolvers":             struct{}{},
-		"blacklisted":           struct{}{},
-		"disabled_data_sources": struct{}{},
-		"gremlin":               struct{}{},
+		"network_settings":      {},
+		"alterations":           {},
+		"bruteforce":            {},
+		"default":               {},
+		"domains":               {},
+		"resolvers":             {},
+		"blacklisted":           {},
+		"disabled_data_sources": {},
+		"gremlin":               {},
 	}
 
 	for _, section := range cfg.Sections() {
@@ -568,11 +618,45 @@ func (c *Config) loadResolverSettings(cfg *ini.File) error {
 	}
 
 	c.MonitorResolverRate = sec.Key("monitor_resolver_rate").MustBool(true)
-	c.ScoreResolvers = sec.Key("score_resolvers").MustBool(true)
 	return nil
 }
 
 // UpdateConfig allows the provided Updater to update the current configuration.
 func (c *Config) UpdateConfig(update Updater) error {
 	return update.OverrideConfig(c)
+}
+
+// AcquireScripts returns all the default and user provided scripts for data sources.
+func (c *Config) AcquireScripts() ([]string, error) {
+	scripts := getDefaultScripts()
+
+	dir := OutputDirectory(c.Dir)
+	if dir == "" {
+		return scripts, nil
+	}
+
+	finfo, err := os.Stat(dir)
+	if os.IsNotExist(err) || !finfo.IsDir() {
+		return scripts, errors.New("The output directory does not exist or is not a directory")
+	}
+
+	filepath.Walk(filepath.Join(dir, "scripts"), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Is this file not a script?
+		if info.IsDir() || filepath.Ext(info.Name()) != ".ads" {
+			return nil
+		}
+		// Get the script content
+		data, err := ioutil.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		scripts = append(scripts, string(data))
+		return nil
+	})
+
+	return scripts, nil
 }
