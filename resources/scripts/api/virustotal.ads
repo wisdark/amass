@@ -3,22 +3,26 @@
 
 local json = require("json")
 
-name = "C99"
+name = "VirusTotal"
 type = "api"
 
 function start()
-    setratelimit(10)
+    setratelimit(15)
 end
 
 function vertical(ctx, domain)
-    if (api == nil or api.key == "") then
-        return
+    local haskey = true
+    if (api == nil or api.key == nil or api.key == "") then
+        haskey = false
     end
 
     local resp
     local vurl = buildurl(domain)
+    if haskey then
+        vurl = apiurl(domain)
+    end
     -- Check if the response data is in the graph database
-    if (api.ttl ~= nil and api.ttl > 0) then
+    if (api and api.ttl ~= nil and api.ttl > 0) then
         resp = obtain_response(vurl, api.ttl)
     end
 
@@ -33,23 +37,36 @@ function vertical(ctx, domain)
             return
         end
 
-        if (api.ttl ~= nil and api.ttl > 0) then
+        if (api and api.ttl ~= nil and api.ttl > 0) then
             cache_response(vurl, resp)
         end
     end
 
     local d = json.decode(resp)
-    if (d == nil or d.success ~= true or #(d.subdomains) == 0) then
-        return
-    end
+    if haskey then
+        if d['response_code'] ~= 1 then
+            log(ctx, name .. ": " .. vurl .. ": Response code " .. d['response_code'] .. ": " .. d['verbose_msg'])
+            return
+        end
 
-    for i, s in pairs(d.subdomains) do
-        sendnames(ctx, s.subdomain)
+        for i, sub in pairs(d.subdomains) do
+            sendnames(ctx, sub)
+        end
+    else
+        for i, data in pairs(d.data) do
+            if data.type == "domain" then
+                sendnames(ctx, data.id)
+            end
+        end
     end
 end
 
 function buildurl(domain)
-    return "https://api.c99.nl/subdomainfinder?key=" .. api.key .. "&domain=" .. domain .. "&json"
+    return "https://www.virustotal.com/ui/domains/" .. domain .. "/subdomains?limit=40"
+end
+
+function apiurl(domain)
+    return "https://www.virustotal.com/vtapi/v2/domain/report?apikey=" .. api.key .. "&domain=" .. domain
 end
 
 function sendnames(ctx, content)

@@ -3,15 +3,16 @@
 
 local json = require("json")
 
-name = "Spyse"
+name = "PassiveTotal"
 type = "api"
 
 function start()
-    setratelimit(2)
+    setratelimit(5)
 end
 
 function vertical(ctx, domain)
-    if (api == nil or api.key == "") then
+    if (api == nil or api.key == nil or api.key == "" or 
+        api.username == nil or api.username == "") then
         return
     end
 
@@ -27,7 +28,9 @@ function vertical(ctx, domain)
 
         resp, err = request({
             url=vurl,
-            headers={['Authorization']="Bearer " .. api.key},
+            headers={['Content-Type']="application/json"},
+            id=api.username,
+            pass=api.key,
         })
         if (err ~= nil and err ~= "") then
             return
@@ -39,17 +42,17 @@ function vertical(ctx, domain)
     end
 
     local d = json.decode(resp)
-    if (d == nil or #(d['data'].items) == 0) then
+    if (d == nil or d.success ~= true or #(d.subdomains) == 0) then
         return
     end
 
-    for i, item in pairs(d['data'].items) do
-        sendnames(ctx, item.name)
+    for i, sub in pairs(d.subdomains) do
+        sendnames(ctx, sub .. "." .. domain)
     end
 end
 
 function buildurl(domain)
-    return "https://api.spyse.com/v3/data/domain/subdomain?limit=100&domain=" .. domain
+    return "https://api.passivetotal.org/v2/enrichment/subdomains?query=" .. domain
 end
 
 function sendnames(ctx, content)
