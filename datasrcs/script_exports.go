@@ -225,17 +225,24 @@ func (s *Script) newName(L *lua.LState) int {
 	}
 
 	lv := L.Get(2)
-	if n, ok := lv.(lua.LString); ok {
-		name := string(n)
+	n, ok := lv.(lua.LString)
+	if !ok {
+		return 0
+	}
 
-		if domain := cfg.WhichDomain(name); domain != "" {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   cleanName(name),
-				Domain: domain,
-				Tag:    s.SourceType,
-				Source: s.String(),
-			})
-		}
+	name := s.subre.FindString(string(n))
+	if name == "" {
+		return 0
+	}
+	cleaned := cleanName(name)
+
+	if domain := cfg.WhichDomain(cleaned); domain != "" {
+		bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
+			Name:   cleaned,
+			Domain: domain,
+			Tag:    s.SourceType,
+			Source: s.String(),
+		})
 	}
 	return 0
 }
@@ -534,14 +541,27 @@ func (s *Script) scrape(L *lua.LState) int {
 	id, _ := getStringField(L, opt, "id")
 	pass, _ := getStringField(L, opt, "pass")
 
-	page, err := http.RequestWebPage(url, nil, headers, id, pass)
-	if err != nil {
-		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", s.String(), url, err))
-		L.Push(lua.LFalse)
-		return 1
+	var resp string
+	// Check for cached responses first
+	api := s.sys.Config().GetAPIKey(s.String())
+	if api != nil && api.TTL > 0 {
+		if r, err := s.getCachedResponse(url, api.TTL); err == nil {
+			resp = r
+		}
 	}
 
-	for _, n := range subRE.FindAllString(page, -1) {
+	if resp == "" {
+		resp, err := http.RequestWebPage(url, nil, headers, id, pass)
+		if err != nil {
+			bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", s.String(), url, err))
+			L.Push(lua.LFalse)
+			return 1
+		}
+
+		s.setCachedResponse(url, resp)
+	}
+
+	for _, n := range subRE.FindAllString(resp, -1) {
 		name := cleanName(n)
 
 		if domain := cfg.WhichDomain(name); domain != "" {
@@ -607,4 +627,54 @@ func getNumberField(L *lua.LState, t lua.LValue, key string) (float64, bool) {
 		return float64(n), true
 	}
 	return 0, false
+}
+
+// Wrapper so that scripts can obtain cached data source responses.
+func (s *Script) obtainResponse(L *lua.LState) int {
+	lv := L.Get(1)
+	u, ok := lv.(lua.LString)
+	if !ok {
+		L.Push(lua.LNil)
+		return 1
+	}
+	url := string(u)
+
+	lv = L.Get(2)
+	t, ok := lv.(lua.LNumber)
+	if !ok {
+		L.Push(lua.LNil)
+		return 1
+	}
+
+	ttl := int(t)
+	if ttl <= 0 {
+		L.Push(lua.LNil)
+		return 1
+	}
+
+	if resp, err := s.getCachedResponse(url, ttl); err == nil {
+		L.Push(lua.LString(resp))
+		return 1
+	}
+
+	L.Push(lua.LNil)
+	return 1
+}
+
+// Wrapper so that scripts can cache data source responses.
+func (s *Script) cacheResponse(L *lua.LState) int {
+	lv := L.Get(1)
+	u, ok := lv.(lua.LString)
+	if !ok {
+		return 0
+	}
+
+	lv = L.Get(2)
+	resp, ok := lv.(lua.LString)
+	if !ok {
+		return 0
+	}
+
+	s.setCachedResponse(string(u), string(resp))
+	return 0
 }

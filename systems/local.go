@@ -6,7 +6,8 @@ package systems
 import (
 	"errors"
 	"fmt"
-	"sync"
+	"runtime"
+	"time"
 
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/graph"
@@ -15,20 +16,24 @@ import (
 	"github.com/OWASP/Amass/v3/resolvers"
 )
 
+type memRequest struct {
+	Stalled bool
+	Result  chan bool
+}
+
 // LocalSystem implements a System to be executed within a single process.
 type LocalSystem struct {
-	sync.Mutex
-
 	cfg    *config.Config
 	pool   resolvers.Resolver
 	graphs []*graph.Graph
 
-	// The various services running within the system
-	dataSources []requests.Service
-
 	// Broadcast channel that indicates no further writes to the output channel
 	done              chan struct{}
 	doneAlreadyClosed bool
+
+	memReq     chan *memRequest
+	addSource  chan requests.Service
+	allSources chan chan []requests.Service
 }
 
 // NewLocalSystem returns an initialized LocalSystem object.
@@ -47,9 +52,12 @@ func NewLocalSystem(c *config.Config) (*LocalSystem, error) {
 	}
 
 	sys := &LocalSystem{
-		cfg:  c,
-		pool: pool,
-		done: make(chan struct{}, 2),
+		cfg:        c,
+		pool:       pool,
+		done:       make(chan struct{}, 2),
+		memReq:     make(chan *memRequest, 2),
+		addSource:  make(chan requests.Service, 10),
+		allSources: make(chan chan []requests.Service, 10),
 	}
 
 	// Setup the correct graph database handler
@@ -58,6 +66,8 @@ func NewLocalSystem(c *config.Config) (*LocalSystem, error) {
 		return nil, err
 	}
 
+	go sys.memConsumptionMonitor()
+	go sys.manageDataSources()
 	return sys, nil
 }
 
@@ -72,11 +82,8 @@ func (l *LocalSystem) Pool() resolvers.Resolver {
 }
 
 // AddSource implements the System interface.
-func (l *LocalSystem) AddSource(srv requests.Service) error {
-	l.Lock()
-	defer l.Unlock()
-
-	l.dataSources = append(l.dataSources, srv)
+func (l *LocalSystem) AddSource(src requests.Service) error {
+	l.addSource <- src
 	return nil
 }
 
@@ -92,10 +99,10 @@ func (l *LocalSystem) AddAndStart(srv requests.Service) error {
 
 // DataSources implements the System interface.
 func (l *LocalSystem) DataSources() []requests.Service {
-	l.Lock()
-	defer l.Unlock()
+	ch := make(chan []requests.Service, 2)
 
-	return l.dataSources
+	l.allSources <- ch
+	return <-ch
 }
 
 // SetDataSources assigns the data sources that will be used by the system.
@@ -113,20 +120,21 @@ func (l *LocalSystem) GraphDatabases() []*graph.Graph {
 
 // Shutdown implements the System interface.
 func (l *LocalSystem) Shutdown() error {
-	if !l.doneAlreadyClosed {
-		l.doneAlreadyClosed = true
-		close(l.done)
+	if l.doneAlreadyClosed {
+		return nil
 	}
+	l.doneAlreadyClosed = true
 
 	for _, src := range l.DataSources() {
 		src.Stop()
 	}
+	close(l.done)
 
 	for _, g := range l.GraphDatabases() {
 		g.Close()
 	}
 
-	l.pool.Stop()
+	go l.pool.Stop()
 	return nil
 }
 
@@ -160,7 +168,7 @@ func (l *LocalSystem) setupGraphDBs() error {
 
 	dir := config.OutputDirectory(c.Dir)
 	if c.LocalDatabase && dir != "" {
-		cayley := graphdb.NewCayleyGraph(dir)
+		cayley := graphdb.NewCayleyGraph(dir, true)
 		if cayley == nil {
 			return fmt.Errorf("System: Failed to create the %s graph", cayley.String())
 		}
@@ -174,4 +182,64 @@ func (l *LocalSystem) setupGraphDBs() error {
 	}
 
 	return nil
+}
+
+// HighMemoryConsumption implements the System interface.
+func (l *LocalSystem) HighMemoryConsumption(stalled bool) bool {
+	if l.doneAlreadyClosed {
+		return false
+	}
+
+	result := make(chan bool, 2)
+
+	l.memReq <- &memRequest{
+		Stalled: stalled,
+		Result:  result,
+	}
+	return <-result
+}
+
+func (l *LocalSystem) memConsumptionMonitor() {
+	var curNormal uint64
+	var highConsumption bool
+
+	curNormal = 1073741824 // one gigabyte
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-l.done:
+			return
+		case <-t.C:
+			var stats runtime.MemStats
+
+			highConsumption = false
+			runtime.ReadMemStats(&stats)
+			if stats.Alloc > curNormal {
+				highConsumption = true
+			}
+		case req := <-l.memReq:
+			if req.Stalled {
+				curNormal += curNormal / 2
+			}
+
+			req.Result <- highConsumption
+		}
+	}
+}
+
+func (l *LocalSystem) manageDataSources() {
+	var dataSources []requests.Service
+
+	for {
+		select {
+		case <-l.done:
+			return
+		case add := <-l.addSource:
+			dataSources = append(dataSources, add)
+		case all := <-l.allSources:
+			all <- dataSources
+		}
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/eventbus"
@@ -34,16 +35,26 @@ type Script struct {
 	asn        lua.LValue
 	resolved   lua.LValue
 	subdomain  lua.LValue
+	// Regexp to match any subdomain name
+	subre *regexp.Regexp
 }
 
 // NewScript returns he object initialized, but not yet started.
 func NewScript(script string, sys systems.System) *Script {
-	s := &Script{sys: sys}
+	re, err := regexp.Compile(dns.AnySubdomainRegexString())
+	if err != nil {
+		return nil
+	}
+
+	s := &Script{
+		sys:   sys,
+		subre: re,
+	}
 	L := s.newLuaState(sys.Config())
 	s.luaState = L
 
 	// Load the script
-	err := L.DoString(script)
+	err = L.DoString(script)
 	if err != nil {
 		msg := fmt.Sprintf("Script: Failed to load script: %v", err)
 
@@ -101,6 +112,8 @@ func (s *Script) newLuaState(cfg *config.Config) *lua.LState {
 	L.SetGlobal("outputdir", L.NewFunction(s.outputdir))
 	L.SetGlobal("setratelimit", L.NewFunction(s.setRateLimit))
 	L.SetGlobal("checkratelimit", L.NewFunction(s.checkRateLimit))
+	L.SetGlobal("obtain_response", L.NewFunction(s.obtainResponse))
+	L.SetGlobal("cache_response", L.NewFunction(s.cacheResponse))
 	L.SetGlobal("subdomainre", lua.LString(dns.AnySubdomainRegexString()))
 	return L
 }
@@ -124,6 +137,9 @@ func (s *Script) registerAPIKey(L *lua.LState, cfg *config.Config) {
 	}
 	if api.Secret != "" {
 		tb.RawSetString("secret", lua.LString(api.Secret))
+	}
+	if api.TTL != 0 {
+		tb.RawSetString("ttl", lua.LNumber(api.TTL))
 	}
 
 	L.SetGlobal("api", tb)
@@ -215,10 +231,13 @@ func (s *Script) OnStop() error {
 		NRet:    0,
 		Protect: true,
 	})
-
 	if err != nil {
-		s.sys.Config().Log.Print(fmt.Sprintf("%s: stop callback: %v", s.String(), err))
+		estr := fmt.Sprintf("%s: stop callback: %v", s.String(), err)
+
+		s.sys.Config().Log.Print(estr)
+		return errors.New(estr)
 	}
+
 	return nil
 }
 
@@ -402,4 +421,24 @@ func (s *Script) OnWhoisRequest(ctx context.Context, req *requests.WhoisRequest)
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("%s: horizontal callback: %v", s.String(), err))
 	}
+}
+
+func (s *Script) getCachedResponse(url string, ttl int) (string, error) {
+	for _, db := range s.sys.GraphDatabases() {
+		if resp, err := db.GetSourceData(s.String(), url, ttl); err == nil {
+			// Allow the data source to accept another request immediately on cache hits
+			s.ClearLast()
+			return resp, err
+		}
+	}
+
+	return "", fmt.Errorf("Failed to obtain a cached response for %s", url)
+}
+
+func (s *Script) setCachedResponse(url, resp string) error {
+	for _, db := range s.sys.GraphDatabases() {
+		db.CacheSourceData(s.String(), s.SourceType, url, resp)
+	}
+
+	return nil
 }

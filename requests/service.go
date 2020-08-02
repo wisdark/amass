@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"reflect"
-	"sync"
 	"time"
 
 	"github.com/OWASP/Amass/v3/queue"
@@ -36,10 +35,6 @@ type Service interface {
 	// Stop the service
 	Stop() error
 	OnStop() error
-
-	// Methods that enforce the rate limit
-	SetRateLimit(min time.Duration)
-	CheckRateLimit()
 
 	// RequestLen returns the current length of the request queue
 	RequestLen() int
@@ -99,24 +94,28 @@ type BaseService struct {
 	// The broadcast channel closed when the service is stopped
 	quit chan struct{}
 
+	setRateChan   chan time.Duration
+	checkRateChan chan chan struct{}
+	clearRateChan chan struct{}
+
 	// The specific service embedding BaseAmassService
 	service Service
-
-	// Rate limit enforcement fields
-	rateLimit time.Duration
-	lastLock  sync.Mutex
-	last      time.Time
 }
 
 // NewBaseService returns an initialized BaseService object.
 func NewBaseService(srv Service, name string) *BaseService {
-	return &BaseService{
-		name:    name,
-		queue:   new(queue.Queue),
-		quit:    make(chan struct{}),
-		service: srv,
-		last:    time.Now().Truncate(10 * time.Minute),
+	bas := &BaseService{
+		name:          name,
+		queue:         new(queue.Queue),
+		quit:          make(chan struct{}),
+		setRateChan:   make(chan time.Duration, 10),
+		checkRateChan: make(chan chan struct{}, 10),
+		clearRateChan: make(chan struct{}, 10),
+		service:       srv,
 	}
+
+	go bas.manageRateLimit()
+	return bas
 }
 
 // Start calls the OnStart method implemented for the Service.
@@ -143,9 +142,9 @@ func (bas *BaseService) Stop() error {
 	if bas.stopped {
 		return errors.New(bas.name + " has already been stopped")
 	}
+	bas.stopped = true
 
 	err := bas.service.OnStop()
-	bas.stopped = true
 	close(bas.quit)
 	return err
 }
@@ -243,22 +242,47 @@ func (bas *BaseService) Stats() *ServiceStats {
 
 // SetRateLimit sets the minimum wait between checks.
 func (bas *BaseService) SetRateLimit(min time.Duration) {
-	bas.rateLimit = min
+	bas.setRateChan <- min
 }
 
 // CheckRateLimit blocks until the minimum wait since the last call.
 func (bas *BaseService) CheckRateLimit() {
-	if bas.rateLimit == time.Duration(0) {
-		return
-	}
+	ch := make(chan struct{}, 2)
 
-	bas.lastLock.Lock()
-	defer bas.lastLock.Unlock()
+	bas.checkRateChan <- ch
+	<-ch
+}
 
-	if delta := time.Now().Sub(bas.last); bas.rateLimit > delta {
-		time.Sleep(bas.rateLimit - delta)
+// ClearLast resets the last value so the service can be utilized immediately.
+func (bas *BaseService) ClearLast() {
+	bas.clearRateChan <- struct{}{}
+}
+
+func (bas *BaseService) manageRateLimit() {
+	var rateLimit time.Duration
+	last := time.Now().Truncate(10 * time.Minute)
+loop:
+	for {
+		select {
+		case <-bas.quit:
+			return
+		case d := <-bas.setRateChan:
+			rateLimit = d
+		case ch := <-bas.checkRateChan:
+			if rateLimit == time.Duration(0) {
+				ch <- struct{}{}
+				continue loop
+			}
+
+			if delta := time.Now().Sub(last); rateLimit > delta {
+				time.Sleep(rateLimit - delta)
+			}
+			last = time.Now()
+			ch <- struct{}{}
+		case <-bas.clearRateChan:
+			last.Truncate(time.Hour)
+		}
 	}
-	bas.last = time.Now()
 }
 
 type queuedCall struct {
