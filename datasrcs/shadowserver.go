@@ -55,8 +55,8 @@ func (s *ShadowServer) Type() string {
 func (s *ShadowServer) OnStart() error {
 	s.BaseService.OnStart()
 
-	if answers, _, err := s.sys.Pool().Resolve(context.TODO(),
-		ShadowServerWhoisURL, "A", resolvers.PriorityCritical); err == nil {
+	if answers, err := s.sys.Pool().Resolve(context.TODO(),
+		ShadowServerWhoisURL, "A", resolvers.PriorityCritical, resolvers.RetryPolicy); err == nil {
 		ip := answers[0].Data
 		if ip != "" {
 			s.addr = ip
@@ -69,18 +69,11 @@ func (s *ShadowServer) OnStart() error {
 
 // OnASNRequest implements the Service interface.
 func (s *ShadowServer) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
-		return
-	}
-
 	if req.Address == "" && req.ASN == 0 {
 		return
 	}
 
 	s.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
-
 	if req.Address != "" {
 		s.executeASNAddrQuery(ctx, req.Address)
 		return
@@ -90,8 +83,8 @@ func (s *ShadowServer) OnASNRequest(ctx context.Context, req *requests.ASNReques
 }
 
 func (s *ShadowServer) executeASNQuery(ctx context.Context, asn int) {
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return
 	}
 
@@ -101,8 +94,6 @@ func (s *ShadowServer) executeASNQuery(ctx context.Context, asn int) {
 	}
 
 	s.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
-
 	req := s.origin(ctx, strings.Trim(blocks.Slice()[0], "/"))
 	if req == nil {
 		return
@@ -113,8 +104,8 @@ func (s *ShadowServer) executeASNQuery(ctx context.Context, asn int) {
 }
 
 func (s *ShadowServer) executeASNAddrQuery(ctx context.Context, addr string) {
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return
 	}
 
@@ -124,15 +115,13 @@ func (s *ShadowServer) executeASNAddrQuery(ctx context.Context, addr string) {
 	}
 
 	s.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
-
 	req.Netblocks.Union(s.netblocks(ctx, req.ASN))
 	bus.Publish(requests.NewASNTopic, eventbus.PriorityHigh, req)
 }
 
 func (s *ShadowServer) origin(ctx context.Context, addr string) *requests.ASNRequest {
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return nil
 	}
 
@@ -141,7 +130,7 @@ func (s *ShadowServer) origin(ctx context.Context, addr string) *requests.ASNReq
 	}
 	name := amassdns.ReverseIP(addr) + ".origin.asn.shadowserver.org"
 
-	answers, _, err := s.sys.Pool().Resolve(ctx, name, "TXT", resolvers.PriorityHigh)
+	answers, err := s.sys.Pool().Resolve(ctx, name, "TXT", resolvers.PriorityHigh, resolvers.RetryPolicy)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("%s: %s: DNS TXT record query error: %v", s.String(), name, err),
@@ -185,13 +174,14 @@ func (s *ShadowServer) origin(ctx context.Context, addr string) *requests.ASNReq
 func (s *ShadowServer) netblocks(ctx context.Context, asn int) stringset.Set {
 	netblocks := stringset.New()
 
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return netblocks
 	}
 
 	if s.addr == "" {
-		answers, _, err := s.sys.Pool().Resolve(ctx, ShadowServerWhoisURL, "A", resolvers.PriorityCritical)
+		answers, err := s.sys.Pool().Resolve(ctx, ShadowServerWhoisURL,
+			"A", resolvers.PriorityCritical, resolvers.RetryPolicy)
 		if err != nil {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 				fmt.Sprintf("%s: %s: %v", s.String(), ShadowServerWhoisURL, err))
@@ -211,8 +201,7 @@ func (s *ShadowServer) netblocks(ctx context.Context, asn int) stringset.Set {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	d := net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", s.addr+":43")
+	conn, err := amassnet.DialContext(ctx, "tcp", s.addr+":43")
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %v", s.String(), err))
 		return netblocks

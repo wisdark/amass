@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/eventbus"
 	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/net/http"
@@ -62,18 +61,11 @@ func (r *Robtex) OnStart() error {
 
 // OnASNRequest implements the Service interface.
 func (r *Robtex) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
-		return
-	}
-
 	if req.Address == "" && req.ASN == 0 {
 		return
 	}
 
 	r.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, r.String())
-
 	if req.Address != "" {
 		r.executeASNAddrQuery(ctx, req.Address)
 		return
@@ -84,9 +76,8 @@ func (r *Robtex) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
 
 // OnDNSRequest implements the Service interface.
 func (r *Robtex) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
-	cfg := ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	cfg, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return
 	}
 
@@ -115,12 +106,7 @@ func (r *Robtex) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
 			name := strings.Trim(line.Data, ".")
 
 			if cfg.IsDomainInScope(name) {
-				bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-					Name:   name,
-					Domain: req.Domain,
-					Tag:    r.Type(),
-					Source: r.String(),
-				})
+				genNewNameEvent(ctx, r.sys, r, name)
 			}
 		}
 	}
@@ -145,14 +131,7 @@ loop:
 			for _, line := range r.parseDNSJSON(pdns) {
 				name := strings.Trim(line.Name, ".")
 
-				if domain := cfg.WhichDomain(name); domain != "" {
-					bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-						Name:   name,
-						Domain: domain,
-						Tag:    r.Type(),
-						Source: r.String(),
-					})
-				}
+				genNewNameEvent(ctx, r.sys, r, name)
 			}
 		}
 	}
@@ -180,9 +159,8 @@ func (r *Robtex) parseDNSJSON(page string) []robtexJSON {
 }
 
 func (r *Robtex) executeASNQuery(ctx context.Context, asn int) {
-	cfg := ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return
 	}
 
@@ -209,9 +187,8 @@ func (r *Robtex) executeASNQuery(ctx context.Context, asn int) {
 }
 
 func (r *Robtex) executeASNAddrQuery(ctx context.Context, addr string) {
-	cfg := ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return
 	}
 
@@ -225,9 +202,8 @@ func (r *Robtex) executeASNAddrQuery(ctx context.Context, addr string) {
 }
 
 func (r *Robtex) origin(ctx context.Context, addr string) *requests.ASNRequest {
-	cfg := ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return nil
 	}
 
@@ -270,47 +246,19 @@ func (r *Robtex) origin(ctx context.Context, addr string) *requests.ASNRequest {
 	}
 
 	for _, n := range ipinfo.ActiveDNS {
-		if cfg.IsDomainInScope(n.Name) {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   n.Name,
-				Domain: r.sys.Pool().SubdomainToDomain(n.Name),
-				Tag:    r.Type(),
-				Source: r.String(),
-			})
-		}
+		genNewNameEvent(ctx, r.sys, r, n.Name)
 	}
 
 	for _, n := range ipinfo.ActiveDNSHistory {
-		if cfg.IsDomainInScope(n.Name) {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   n.Name,
-				Domain: r.sys.Pool().SubdomainToDomain(n.Name),
-				Tag:    r.Type(),
-				Source: r.String(),
-			})
-		}
+		genNewNameEvent(ctx, r.sys, r, n.Name)
 	}
 
 	for _, n := range ipinfo.PassiveDNS {
-		if cfg.IsDomainInScope(n.Name) {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   n.Name,
-				Domain: r.sys.Pool().SubdomainToDomain(n.Name),
-				Tag:    r.Type(),
-				Source: r.String(),
-			})
-		}
+		genNewNameEvent(ctx, r.sys, r, n.Name)
 	}
 
 	for _, n := range ipinfo.PassiveDNSHistory {
-		if cfg.IsDomainInScope(n.Name) {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   n.Name,
-				Domain: r.sys.Pool().SubdomainToDomain(n.Name),
-				Tag:    r.Type(),
-				Source: r.String(),
-			})
-		}
+		genNewNameEvent(ctx, r.sys, r, n.Name)
 	}
 
 	if ipinfo.ASN == 0 {
@@ -342,8 +290,8 @@ func (r *Robtex) origin(ctx context.Context, addr string) *requests.ASNRequest {
 func (r *Robtex) netblocks(ctx context.Context, asn int) stringset.Set {
 	netblocks := stringset.New()
 
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return netblocks
 	}
 

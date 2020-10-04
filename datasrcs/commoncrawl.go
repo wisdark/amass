@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/eventbus"
 	"github.com/OWASP/Amass/v3/net/http"
 	"github.com/OWASP/Amass/v3/requests"
@@ -83,9 +82,8 @@ func (c *CommonCrawl) OnStart() error {
 
 // OnDNSRequest implements the Service interface.
 func (c *CommonCrawl) OnDNSRequest(ctx context.Context, req *requests.DNSRequest) {
-	cfg := ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	cfg, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return
 	}
 
@@ -114,12 +112,7 @@ func (c *CommonCrawl) OnDNSRequest(ctx context.Context, req *requests.DNSRequest
 
 			for _, url := range c.parseJSON(page) {
 				if name := re.FindString(url); name != "" && !filter.Duplicate(name) {
-					bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-						Name:   name,
-						Domain: req.Domain,
-						Tag:    c.SourceType,
-						Source: c.String(),
-					})
+					genNewNameEvent(ctx, c.sys, c, name)
 				}
 			}
 		}
@@ -159,7 +152,7 @@ func (c *CommonCrawl) getURL(domain, index string) string {
 	u.RawQuery = url.Values{
 		"url":      {"*." + domain},
 		"output":   {"json"},
-		"filter":   {"=status:200"},
+		"filter":   {"status:200"},
 		"fl":       {"url,status"},
 		"pageSize": {"2000"},
 	}.Encode()

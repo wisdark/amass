@@ -28,8 +28,8 @@ type contextWrapper struct {
 // Wrapper so that scripts can obtain the configuration for the current enumeration.
 func (s *Script) config(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	if cfg == nil {
+	cfg, _, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		L.Push(lua.LNil)
 		return 1
 	}
@@ -121,11 +121,47 @@ func (s *Script) config(L *lua.LState) int {
 	return 1
 }
 
+func (s *Script) dataSourceConfig(L *lua.LState) int {
+	cfg := s.sys.Config().GetDataSourceConfig(s.String())
+	if cfg == nil {
+		L.Push(lua.LNil)
+		return 1
+	}
+
+	tb := L.NewTable()
+	tb.RawSetString("name", lua.LString(cfg.Name))
+	if cfg.TTL != 0 {
+		tb.RawSetString("ttl", lua.LNumber(cfg.TTL))
+	}
+
+	if creds := cfg.GetCredentials(); creds != nil {
+		c := L.NewTable()
+
+		c.RawSetString("name", lua.LString(creds.Name))
+		if creds.Username != "" {
+			c.RawSetString("username", lua.LString(creds.Username))
+		}
+		if creds.Password != "" {
+			c.RawSetString("password", lua.LString(creds.Password))
+		}
+		if creds.Key != "" {
+			c.RawSetString("key", lua.LString(creds.Key))
+		}
+		if creds.Secret != "" {
+			c.RawSetString("secret", lua.LString(creds.Secret))
+		}
+		tb.RawSetString("credentials", c)
+	}
+
+	L.Push(tb)
+	return 1
+}
+
 // Wrapper so that scripts can obtain the brute force wordlist for the current enumeration.
 func (s *Script) bruteWordlist(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	if cfg == nil {
+	cfg, _, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		L.Push(lua.LNil)
 		return 1
 	}
@@ -142,8 +178,8 @@ func (s *Script) bruteWordlist(L *lua.LState) int {
 // Wrapper so that scripts can obtain the alteration wordlist for the current enumeration.
 func (s *Script) altWordlist(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	if cfg == nil {
+	cfg, _, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		L.Push(lua.LNil)
 		return 1
 	}
@@ -179,8 +215,8 @@ func (s *Script) checkRateLimit(L *lua.LState) int {
 // Wrapper so scripts can signal Amass of script activity.
 func (s *Script) active(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	bus := c.Ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus != nil {
+	_, bus, err := ContextConfigBus(c.Ctx)
+	if err == nil {
 		bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, s.String())
 	}
 	return 0
@@ -191,8 +227,8 @@ func (s *Script) outputdir(L *lua.LState) int {
 	var dir string
 
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	if cfg != nil {
+	cfg, _, err := ContextConfigBus(c.Ctx)
+	if err == nil {
 		dir = config.OutputDirectory(cfg.Dir)
 	}
 
@@ -203,14 +239,14 @@ func (s *Script) outputdir(L *lua.LState) int {
 // Wrapper so that scripts can write messages to the Amass log.
 func (s *Script) log(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	bus := c.Ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		return 0
 	}
 
 	lv := L.Get(2)
 	if msg, ok := lv.(lua.LString); ok {
-		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, string(msg))
+		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, s.String()+": "+string(msg))
 	}
 	return 0
 }
@@ -218,9 +254,7 @@ func (s *Script) log(L *lua.LState) int {
 // Wrapper so that scripts can send discovered FQDNs to Amass.
 func (s *Script) newName(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := c.Ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	if c == nil {
 		return 0
 	}
 
@@ -234,25 +268,16 @@ func (s *Script) newName(L *lua.LState) int {
 	if name == "" {
 		return 0
 	}
-	cleaned := cleanName(name)
 
-	if domain := cfg.WhichDomain(cleaned); domain != "" {
-		bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-			Name:   cleaned,
-			Domain: domain,
-			Tag:    s.SourceType,
-			Source: s.String(),
-		})
-	}
+	genNewNameEvent(c.Ctx, s.sys, s, http.CleanName(name))
 	return 0
 }
 
 // Wrapper so that scripts can send discovered IP addresses to Amass.
 func (s *Script) newAddr(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := c.Ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	cfg, bus, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		return 0
 	}
 
@@ -291,9 +316,8 @@ func (s *Script) newAddr(L *lua.LState) int {
 // Wrapper so that scripts can send discovered ASNs to Amass.
 func (s *Script) newASN(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := c.Ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	_, bus, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		return 0
 	}
 
@@ -341,9 +365,8 @@ func (s *Script) newASN(L *lua.LState) int {
 // Wrapper so that scripts can send discovered associated domains to Amass.
 func (s *Script) associated(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := c.Ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	_, bus, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		return 0
 	}
 
@@ -456,8 +479,8 @@ func (s *Script) contextToUserData(ctx context.Context) *lua.LUserData {
 // Wrapper so that scripts can check if a subdomain name is in scope.
 func (s *Script) inScope(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	if cfg == nil {
+	cfg, _, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		L.Push(lua.LFalse)
 		return 1
 	}
@@ -503,7 +526,7 @@ func (s *Script) request(L *lua.LState) int {
 
 	page, err := http.RequestWebPage(url, body, headers, id, pass)
 	if err != nil {
-		L.Push(lua.LNil)
+		L.Push(lua.LString(page))
 		L.Push(lua.LString(err.Error()))
 		return 2
 	}
@@ -516,9 +539,8 @@ func (s *Script) request(L *lua.LState) int {
 // Wrapper so that scripts can scrape the contents of a GET request for subdomain names in scope.
 func (s *Script) scrape(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := c.Ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	_, bus, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		L.Push(lua.LFalse)
 		return 1
 	}
@@ -543,35 +565,28 @@ func (s *Script) scrape(L *lua.LState) int {
 
 	var resp string
 	// Check for cached responses first
-	api := s.sys.Config().GetAPIKey(s.String())
-	if api != nil && api.TTL > 0 {
-		if r, err := s.getCachedResponse(url, api.TTL); err == nil {
+	dsc := s.sys.Config().GetDataSourceConfig(s.String())
+	if dsc != nil && dsc.TTL > 0 {
+		if r, err := s.getCachedResponse(url, dsc.TTL); err == nil {
 			resp = r
 		}
 	}
 
 	if resp == "" {
-		resp, err := http.RequestWebPage(url, nil, headers, id, pass)
+		resp, err = http.RequestWebPage(url, nil, headers, id, pass)
 		if err != nil {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", s.String(), url, err))
 			L.Push(lua.LFalse)
 			return 1
 		}
 
-		s.setCachedResponse(url, resp)
+		if dsc != nil && dsc.TTL > 0 {
+			s.setCachedResponse(url, resp)
+		}
 	}
 
-	for _, n := range subRE.FindAllString(resp, -1) {
-		name := cleanName(n)
-
-		if domain := cfg.WhichDomain(name); domain != "" {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   name,
-				Domain: domain,
-				Tag:    s.SourceType,
-				Source: s.String(),
-			})
-		}
+	for _, name := range subRE.FindAllString(resp, -1) {
+		genNewNameEvent(c.Ctx, s.sys, s, http.CleanName(name))
 	}
 
 	L.Push(lua.LTrue)
@@ -581,9 +596,8 @@ func (s *Script) scrape(L *lua.LState) int {
 // Wrapper so that scripts can crawl for subdomain names in scope.
 func (s *Script) crawl(L *lua.LState) int {
 	c := L.CheckUserData(1).Value.(*contextWrapper)
-	cfg := c.Ctx.Value(requests.ContextConfig).(*config.Config)
-	bus := c.Ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if cfg == nil || bus == nil {
+	cfg, bus, err := ContextConfigBus(c.Ctx)
+	if err != nil {
 		return 0
 	}
 
@@ -593,21 +607,14 @@ func (s *Script) crawl(L *lua.LState) int {
 		return 0
 	}
 
-	names, err := crawl(c.Ctx, string(u))
+	names, err := http.Crawl(string(u), cfg.Domains())
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", s.String(), u, err))
 		return 0
 	}
 
 	for _, name := range names {
-		if domain := cfg.WhichDomain(name); domain != "" {
-			bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-				Name:   name,
-				Domain: domain,
-				Tag:    s.SourceType,
-				Source: s.String(),
-			})
-		}
+		genNewNameEvent(c.Ctx, s.sys, s, http.CleanName(name))
 	}
 
 	return 0

@@ -10,15 +10,34 @@ function start()
     setratelimit(2)
 end
 
+function check()
+    local c
+    local cfg = datasrc_config()
+    if cfg ~= nil then
+        c = cfg.credentials
+    end
+
+    if (c ~= nil and c.key ~= nil and c.key ~= "") then
+        return true
+    end
+    return false
+end
+
 function vertical(ctx, domain)
-    if (api ~= nil and api.key ~= '') then
+    if check() then
         apiquery(ctx, domain)
     end
 end
 
 function apiquery(ctx, domain)
+    local c
+    local cfg = datasrc_config()
+    if cfg ~= nil then
+        c = cfg.credentials
+    end
+
     local hdrs={
-        ['X-KEY']=api["key"],
+        ['X-KEY']=c["key"],
         ['Content-Type']="application/json",
     }
 
@@ -26,8 +45,8 @@ function apiquery(ctx, domain)
         local resp
         local vurl = apiurl(domain, i)
         -- Check if the response data is in the graph database
-        if (api.ttl ~= nil and api.ttl > 0) then
-            resp = obtain_response(vurl, api.ttl)
+        if (cfg.ttl ~= nil and cfg.ttl > 0) then
+            resp = obtain_response(vurl, cfg.ttl)
         end
 
         if (resp == nil or resp == "") then
@@ -41,7 +60,7 @@ function apiquery(ctx, domain)
                 return
             end
     
-            if (api.ttl ~= nil and api.ttl > 0) then
+            if (cfg.ttl ~= nil and cfg.ttl > 0) then
                 cache_response(vurl, resp)
             end
         end
