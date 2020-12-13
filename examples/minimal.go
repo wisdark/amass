@@ -23,7 +23,7 @@ func main() {
 	if err != nil {
 		return
 	}
-	sys.SetDataSources(datasrcs.GetAllSources(sys))
+	sys.SetDataSources(datasrcs.GetAllSources(sys, true))
 
 	e := enum.NewEnumeration(cfg, sys)
 	if e == nil {
@@ -32,7 +32,7 @@ func main() {
 	defer e.Close()
 
 	e.Start()
-	for _, o := range e.ExtractOutput(nil) {
+	for _, o := range e.ExtractOutput(nil, false) {
 		fmt.Println(o.Name)
 	}
 }

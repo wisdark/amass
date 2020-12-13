@@ -14,15 +14,17 @@ import (
 )
 
 // ExtractOutput is a convenience method for obtaining new discoveries made by the enumeration process.
-func (e *Enumeration) ExtractOutput(filter stringfilter.Filter) []*requests.Output {
+func (e *Enumeration) ExtractOutput(filter stringfilter.Filter, asinfo bool) []*requests.Output {
 	if e.Config.Passive {
 		return e.Graph.EventNames(e.Config.UUID.String(), filter)
 	}
 
-	return e.Graph.EventOutput(e.Config.UUID.String(), filter, e.netCache)
+	return e.Graph.EventOutput(e.Config.UUID.String(), filter, asinfo, e.Sys.Cache())
 }
 
 func (e *Enumeration) submitKnownNames() {
+	filter := stringfilter.NewStringFilter()
+
 	for _, g := range e.Sys.GraphDatabases() {
 		var events []string
 
@@ -35,13 +37,19 @@ func (e *Enumeration) submitKnownNames() {
 		}
 
 		for _, event := range events {
-			for _, output := range g.EventNames(event, nil) {
+			select {
+			case <-e.done:
+				return
+			default:
+			}
+
+			for _, output := range g.EventNames(event, filter) {
 				if e.Config.IsDomainInScope(output.Name) {
 					e.Bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
 						Name:   output.Name,
 						Domain: output.Domain,
 						Tag:    output.Tag,
-						Source: output.Source,
+						Source: output.Sources[0],
 					})
 				}
 			}

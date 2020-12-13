@@ -54,8 +54,8 @@ func (t *TeamCymru) OnStart() error {
 
 // OnASNRequest implements the Service interface.
 func (t *TeamCymru) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return
 	}
 
@@ -64,16 +64,12 @@ func (t *TeamCymru) OnASNRequest(ctx context.Context, req *requests.ASNRequest) 
 	}
 
 	t.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, t.String())
-
 	r := t.origin(ctx, req.Address)
 	if r == nil {
 		return
 	}
 
 	t.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, t.String())
-
 	asn := t.asnLookup(ctx, r.ASN)
 	if asn == nil {
 		return
@@ -85,12 +81,11 @@ func (t *TeamCymru) OnASNRequest(ctx context.Context, req *requests.ASNRequest) 
 }
 
 func (t *TeamCymru) origin(ctx context.Context, addr string) *requests.ASNRequest {
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return nil
 	}
 
-	var err error
 	var name string
 	var answers []requests.DNSAnswer
 	if ip := net.ParseIP(addr); amassnet.IsIPv4(ip) {
@@ -104,7 +99,7 @@ func (t *TeamCymru) origin(ctx context.Context, addr string) *requests.ASNReques
 		return nil
 	}
 
-	answers, _, err = t.sys.Pool().Resolve(ctx, name, "TXT", resolvers.PriorityCritical)
+	answers, err = t.sys.Pool().Resolve(ctx, name, "TXT", resolvers.PriorityCritical, resolvers.RetryPolicy)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("%s: %s: DNS TXT record query error: %v", t.String(), name, err),
@@ -147,16 +142,15 @@ func (t *TeamCymru) origin(ctx context.Context, addr string) *requests.ASNReques
 }
 
 func (t *TeamCymru) asnLookup(ctx context.Context, asn int) *requests.ASNRequest {
-	bus := ctx.Value(requests.ContextEventBus).(*eventbus.EventBus)
-	if bus == nil {
+	_, bus, err := ContextConfigBus(ctx)
+	if err != nil {
 		return nil
 	}
 
-	var err error
 	var answers []requests.DNSAnswer
 	name := "AS" + strconv.Itoa(asn) + ".asn.cymru.com"
 
-	answers, _, err = t.sys.Pool().Resolve(ctx, name, "TXT", resolvers.PriorityCritical)
+	answers, err = t.sys.Pool().Resolve(ctx, name, "TXT", resolvers.PriorityCritical, resolvers.RetryPolicy)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("%s: %s: DNS TXT record query error: %v", t.String(), name, err),

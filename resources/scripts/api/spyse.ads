@@ -10,16 +10,35 @@ function start()
     setratelimit(2)
 end
 
+function check()
+    local c
+    local cfg = datasrc_config()
+    if cfg ~= nil then
+        c = cfg.credentials
+    end
+
+    if (c ~= nil and c.key ~= nil and c.key ~= "") then
+        return true
+    end
+    return false
+end
+
 function vertical(ctx, domain)
-    if (api == nil or api.key == "") then
+    local c
+    local cfg = datasrc_config()
+    if cfg ~= nil then
+        c = cfg.credentials
+    end
+
+    if (c == nil or c.key == nil or c.key == "") then
         return
     end
 
     local resp
     local vurl = buildurl(domain)
     -- Check if the response data is in the graph database
-    if (api.ttl ~= nil and api.ttl > 0) then
-        resp = obtain_response(vurl, api.ttl)
+    if (cfg.ttl ~= nil and cfg.ttl > 0) then
+        resp = obtain_response(domain, cfg.ttl)
     end
 
     if (resp == nil or resp == "") then
@@ -27,14 +46,14 @@ function vertical(ctx, domain)
 
         resp, err = request({
             url=vurl,
-            headers={['Authorization']="Bearer " .. api.key},
+            headers={['Authorization']="Bearer " .. c.key},
         })
         if (err ~= nil and err ~= "") then
             return
         end
 
-        if (api.ttl ~= nil and api.ttl > 0) then
-            cache_response(vurl, resp)
+        if (cfg.ttl ~= nil and cfg.ttl > 0) then
+            cache_response(domain, resp)
         end
     end
 
