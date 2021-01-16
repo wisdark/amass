@@ -1,40 +1,59 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2020 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package graph
 
 import (
-	"github.com/OWASP/Amass/v3/graph/db"
-	"github.com/OWASP/Amass/v3/stringset"
+	"math/rand"
+
 	"github.com/OWASP/Amass/v3/viz"
+	"github.com/caffix/stringset"
 )
 
 // VizData returns the current state of the Graph as viz package Nodes and Edges.
-func (g *Graph) VizData(uuid string) ([]viz.Node, []viz.Edge) {
-	event, err := g.db.ReadNode(uuid, "event")
-	if err != nil {
-		return nil, nil
-	}
-
-	discovered, err := g.db.ReadOutEdges(event)
-	if err != nil {
-		return nil, nil
-	}
-
-	var idx int
+func (g *Graph) VizData(uuids []string) ([]viz.Node, []viz.Edge) {
+	var nextIdx int
 	var nodes []viz.Node
 	ids := stringset.New()
-	rnodes := make(map[string]int)
-	// Identify unique nodes that should be included in the visualization
-	for _, d := range discovered {
-		if id := g.db.NodeToID(d.To); id != "" && !ids.Has(id) {
-			ids.Insert(id)
+	nodeToIdx := make(map[string]int)
+
+	for i := len(uuids) - 1; i >= 0; i-- {
+		event, err := g.db.ReadNode(uuids[i], "event")
+		if err != nil {
+			continue
+		}
+
+		discovered, err := g.db.ReadOutEdges(event)
+		if err != nil {
+			continue
+		}
+
+		var n []viz.Node
+		n, nextIdx = g.vizNodes(uuids[i], ids, nextIdx, nodeToIdx, discovered)
+		nodes = append(nodes, n...)
+	}
+
+	return nodes, g.vizEdges(uuids, nodes, nodeToIdx)
+}
+
+// Identify unique nodes that should be included in the visualization.
+func (g *Graph) vizNodes(uuid string, filter stringset.Set, idx int, nodeToIdx map[string]int, edges []*Edge) ([]viz.Node, int) {
+	var nodes []viz.Node
+
+	for _, d := range edges {
+		if id := g.db.NodeToID(d.To); id != "" && !filter.Has(id) {
+			filter.Insert(id)
 
 			properties, err := g.db.ReadProperties(d.To, "type")
-			if err != nil || len(properties) == 0 || properties[0].Value == "source" {
+			// We do not print the source, event or response nodes in the graph visualizations
+			if err != nil || len(properties) == 0 ||
+				properties[0].Value == "source" ||
+				properties[0].Value == "event" ||
+				properties[0].Value == "response" {
 				continue
 			}
 
+			// We do not print the TLD nodes in the graph visualizations
 			if g.IsTLDNode(id) {
 				continue
 			}
@@ -42,17 +61,27 @@ func (g *Graph) VizData(uuid string) ([]viz.Node, []viz.Edge) {
 			if n := g.buildVizNode(d.To, properties[0].Value, uuid); n != nil {
 				n.ID = idx
 				// Keep track of which indices nodes were assigned to
-				rnodes[id] = idx
+				nodeToIdx[id] = idx
 				idx++
 				nodes = append(nodes, *n)
 			}
 		}
 	}
 
+	return nodes, idx
+}
+
+// Identify the edges between nodes that should be included in the visualization.
+func (g *Graph) vizEdges(uuids []string, nodes []viz.Node, nodeToIdx map[string]int) []viz.Edge {
 	var edges []viz.Edge
-	// Identify the edges between nodes that should be included in the visualization
+
+	uuidIdx := make(map[string]int, len(uuids))
+	for idx, uuid := range uuids {
+		uuidIdx[uuid] = idx
+	}
+
 	for _, n := range nodes {
-		node, err := g.db.ReadNode(n.Label, n.Type)
+		node, err := g.db.ReadNode(n.Label, n.ActualType)
 		if err != nil {
 			continue
 		}
@@ -64,8 +93,36 @@ func (g *Graph) VizData(uuid string) ([]viz.Node, []viz.Edge) {
 			continue
 		}
 
+		var newest int
 		for _, edge := range e {
-			if toID, found := rnodes[g.db.NodeToID(edge.To)]; found {
+			if edge.Predicate != "a_record" && edge.Predicate != "aaaa_record" {
+				continue
+			}
+			if events, err := g.db.ReadInEdges(edge.To, "DNS"); err == nil {
+				for _, event := range events {
+					if idx := uuidIdx[g.db.NodeToID(event.From)]; idx > newest {
+						newest = idx
+					}
+				}
+			}
+		}
+
+		for _, edge := range e {
+			if edge.Predicate == "a_record" || edge.Predicate == "aaaa_record" {
+				var use bool
+				if events, err := g.db.ReadInEdges(edge.To, "DNS"); err == nil {
+					for _, event := range events {
+						if idx := uuidIdx[g.db.NodeToID(event.From)]; idx == newest {
+							use = true
+							break
+						}
+					}
+				}
+				if !use {
+					continue
+				}
+			}
+			if toID, found := nodeToIdx[g.db.NodeToID(edge.To)]; found {
 				edges = append(edges, viz.Edge{
 					From:  n.ID,
 					To:    toID,
@@ -75,10 +132,10 @@ func (g *Graph) VizData(uuid string) ([]viz.Node, []viz.Edge) {
 		}
 	}
 
-	return nodes, edges
+	return edges
 }
 
-func (g *Graph) buildVizNode(node db.Node, ntype, uuid string) *viz.Node {
+func (g *Graph) buildVizNode(node Node, ntype, uuid string) *viz.Node {
 	id := g.db.NodeToID(node)
 
 	edges, err := g.db.ReadInEdges(node)
@@ -99,9 +156,26 @@ func (g *Graph) buildVizNode(node db.Node, ntype, uuid string) *viz.Node {
 	}
 	src := sources[randomIndex(len(sources))]
 
-	// Update the type names for visualization
+	newtype := g.convertNodeType(id, ntype, edges)
+	title := newtype + ": " + id
+	if newtype == "as" {
+		title = title + ", Desc: " + g.ReadASDescription(id)
+	}
+
+	return &viz.Node{
+		Type:       newtype,
+		Label:      id,
+		Title:      title,
+		Source:     src,
+		ActualType: ntype,
+	}
+}
+
+// Update the type names for visualization.
+func (g *Graph) convertNodeType(id, ntype string, edges []*Edge) string {
 	if ntype == "fqdn" {
 		var pred string
+
 		// Look for edge predicates of interest
 		for _, edge := range edges {
 			if edge.Predicate == "root" ||
@@ -130,15 +204,13 @@ func (g *Graph) buildVizNode(node db.Node, ntype, uuid string) *viz.Node {
 		ntype = "address"
 	}
 
-	title := ntype + ": " + id
-	if ntype == "as" {
-		title = title + ", Desc: " + g.ReadASDescription(id)
+	return ntype
+}
+
+func randomIndex(length int) int {
+	if length == 1 {
+		return 0
 	}
 
-	return &viz.Node{
-		Type:   ntype,
-		Label:  id,
-		Title:  title,
-		Source: src,
-	}
+	return rand.Intn(length - 1)
 }

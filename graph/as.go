@@ -4,13 +4,15 @@
 package graph
 
 import (
+	"net"
 	"strconv"
 
-	"github.com/OWASP/Amass/v3/graph/db"
+	amassnet "github.com/OWASP/Amass/v3/net"
+	"github.com/OWASP/Amass/v3/requests"
 )
 
 // InsertAS adds/updates an autonomous system in the graph.
-func (g *Graph) InsertAS(asn, desc, source, tag, eventID string) (db.Node, error) {
+func (g *Graph) InsertAS(asn, desc, source, tag, eventID string) (Node, error) {
 	asNode, err := g.InsertNodeIfNotExist(asn, "as")
 	if err != nil {
 		return asNode, err
@@ -55,7 +57,7 @@ func (g *Graph) InsertInfrastructure(asn int, desc, addr, cidr, source, tag, eve
 	}
 
 	// Create the edge between the CIDR and the address
-	containsEdge := &db.Edge{
+	containsEdge := &Edge{
 		Predicate: "contains",
 		From:      cidrNode,
 		To:        ipNode,
@@ -70,25 +72,72 @@ func (g *Graph) InsertInfrastructure(asn int, desc, addr, cidr, source, tag, eve
 	}
 
 	// Create the edge between the AS and the netblock
-	prefixEdge := &db.Edge{
+	prefixEdge := &Edge{
 		Predicate: "prefix",
 		From:      asNode,
 		To:        cidrNode,
 	}
-	if err := g.InsertEdge(prefixEdge); err != nil {
-		return err
-	}
 
-	return nil
+	return g.InsertEdge(prefixEdge)
 }
 
 // ReadASDescription the description property of an autonomous system in the graph.
 func (g *Graph) ReadASDescription(asn string) string {
 	if asNode, err := g.db.ReadNode(asn, "as"); err == nil {
-		if p, err := g.db.ReadProperties(asNode, "description"); err == nil && len(p) > 0 {
-			return p[0].Value
-		}
+		return g.nodeDescription(asNode)
 	}
 
 	return ""
+}
+
+func (g *Graph) nodeDescription(node Node) string {
+	if p, err := g.db.ReadProperties(node, "description"); err == nil && len(p) > 0 {
+		return p[0].Value
+	}
+
+	return ""
+}
+
+// ASNCacheFill populates an ASNCache object with the AS data in the receiver object.
+func (g *Graph) ASNCacheFill(cache *amassnet.ASNCache) error {
+	nodes, err := g.AllNodesOfType("as")
+	if err != nil {
+		return err
+	}
+
+	for _, as := range nodes {
+		id := g.db.NodeToID(as)
+		asn, _ := strconv.Atoi(id)
+		if asn <= 0 {
+			continue
+		}
+
+		desc := g.nodeDescription(as)
+		if g.alreadyClosed {
+			return nil
+		}
+
+		edges, err := g.db.ReadOutEdges(as, "prefix")
+		if err != nil {
+			continue
+		}
+
+		for _, edge := range edges {
+			if g.alreadyClosed {
+				return nil
+			}
+
+			if _, cidr, err := net.ParseCIDR(g.db.NodeToID(edge.To)); err == nil {
+				cache.Update(&requests.ASNRequest{
+					Address:     cidr.IP.String(),
+					ASN:         asn,
+					Prefix:      cidr.String(),
+					Description: desc,
+					Tag:         requests.RIR,
+					Source:      g.String(),
+				})
+			}
+		}
+	}
+	return nil
 }

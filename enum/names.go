@@ -1,325 +1,295 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2020 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package enum
 
 import (
+	"context"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/OWASP/Amass/v3/eventbus"
-	"github.com/OWASP/Amass/v3/queue"
 	"github.com/OWASP/Amass/v3/requests"
 	"github.com/OWASP/Amass/v3/stringfilter"
+	"github.com/caffix/pipeline"
+	"github.com/caffix/queue"
 )
 
-var probeNames = []string{
-	"www",
-	"online",
-	"webserver",
-	"ns1",
-	"mail",
-	"smtp",
-	"webmail",
-	"prod",
-	"test",
-	"vpn",
-	"ftp",
-	"ssh",
-}
-
-// FQDNManager is the object type for taking in, generating and providing new DNS FQDNs.
-type FQDNManager interface {
-	// InputName shares a newly discovered FQDN with the NameManager
-	InputName(req *requests.DNSRequest)
-
-	// OutputNames requests new FQDNs from the NameManager
-	OutputNames(num int) []*requests.DNSRequest
-
-	Stop() error
-}
-
-// DomainManager handles the release of new domains names to data sources used in the enumeration.
-type DomainManager struct {
-	enum   *Enumeration
-	queue  *queue.Queue
-	filter stringfilter.Filter
-}
-
-// NewDomainManager returns an initialized DomainManager.
-func NewDomainManager(e *Enumeration) *DomainManager {
-	return &DomainManager{
-		enum:   e,
-		queue:  new(queue.Queue),
-		filter: stringfilter.NewStringFilter(),
-	}
-}
-
-// InputName implements the FQDNManager interface.
-func (r *DomainManager) InputName(req *requests.DNSRequest) {
-	if req == nil || req.Name == "" || req.Domain == "" {
-		return
-	}
-
-	if r.filter.Duplicate(req.Domain) {
-		return
-	}
-
-	r.queue.Append(req)
-}
-
-// OutputNames implements the FQDNManager interface.
-func (r *DomainManager) OutputNames(num int) []*requests.DNSRequest {
-	var results []*requests.DNSRequest
-
-	if num <= 0 {
-		return results
-	}
-
-	element, ok := r.queue.Next()
-	if !ok {
-		return results
-	}
-
-	req := element.(*requests.DNSRequest)
-	results = append(results, req)
-
-	r.enum.srcsLock.Lock()
-	// Release the new domain name to all the data sources
-	for _, src := range r.enum.Sys.DataSources() {
-		if !r.enum.srcs.Has(src.String()) {
-			continue
-		}
-
-		src.DNSRequest(r.enum.ctx, &requests.DNSRequest{
-			Name:   req.Domain,
-			Domain: req.Domain,
-			Tag:    requests.DNS,
-			Source: "DNS",
-		})
-	}
-	r.enum.srcsLock.Unlock()
-
-	return results
-}
-
-// Stop implements the FQDNManager interface.
-func (r *DomainManager) Stop() error {
-	r.queue = new(queue.Queue)
-	r.filter = stringfilter.NewStringFilter()
-	return nil
-}
-
-// SubdomainManager handles newly discovered proper subdomain names in the enumeration.
-type SubdomainManager struct {
+// The filter for new outgoing DNS queries
+type fqdnFilter struct {
 	sync.Mutex
-	enum       *Enumeration
-	queue      *queue.Queue
-	subdomains map[string]int
+	filter stringfilter.Filter
+	count  int64
+	enum   *Enumeration
+	queue  queue.Queue
 }
 
-// NewSubdomainManager returns an initialized SubdomainManager.
-func NewSubdomainManager(e *Enumeration) *SubdomainManager {
-	return &SubdomainManager{
-		enum:       e,
-		queue:      new(queue.Queue),
-		subdomains: make(map[string]int),
+func newFQDNFilter(e *Enumeration) *fqdnFilter {
+	f := &fqdnFilter{
+		filter: stringfilter.NewBloomFilter(filterMaxSize),
+		enum:   e,
+		queue:  queue.NewQueue(),
 	}
+
+	go f.processDupNames()
+	return f
 }
 
-// InputName implements the FQDNManager interface.
-func (r *SubdomainManager) InputName(req *requests.DNSRequest) {
-	if req == nil || req.Name == "" || req.Domain == "" {
-		return
+func (f *fqdnFilter) Process(ctx context.Context, data pipeline.Data, tp pipeline.TaskParams) (pipeline.Data, error) {
+	req, ok := data.(*requests.DNSRequest)
+	if !ok {
+		return data, nil
 	}
 
 	// Clean up the newly discovered name and domain
 	requests.SanitizeDNSRequest(req)
-
-	// Send every resolved name and associated DNS records to the data manager
-	r.enum.dataMgr.DNSRequest(r.enum.ctx, req)
-
-	if !r.enum.Config.IsDomainInScope(req.Name) {
-		return
-	}
-
-	// Keep track of all domains and proper subdomains discovered
-	r.checkSubdomain(req)
-
-	// Send out some probe requests to help cause recursive brute forcing
-	if r.enum.Config.BruteForcing && r.enum.Config.Recursive && r.enum.Config.MinForRecursive > 0 {
-		for _, probe := range probeNames {
-			r.queue.Append(&requests.DNSRequest{
-				Name:   probe + "." + req.Name,
-				Domain: req.Domain,
-				Tag:    requests.BRUTE,
-				Source: "Enum Probes",
-			})
-		}
-	}
-
-	// Queue the resolved name for future brute forcing
-	if r.enum.Config.BruteForcing && r.enum.Config.Recursive && r.enum.Config.MinForRecursive == 0 {
-		// Do not send in the resolved root domain names
-		if len(strings.Split(req.Name, ".")) != len(strings.Split(req.Domain, ".")) {
-			r.enum.bruteMgr.InputName(req)
-		}
-	}
-
-	r.enum.srcsLock.Lock()
-	defer r.enum.srcsLock.Unlock()
-	// Call DNSRequest for all web archive services
-	for _, srv := range r.enum.Sys.DataSources() {
-		if srv.Type() == requests.ARCHIVE && r.enum.srcs.Has(srv.String()) {
-			srv.DNSRequest(r.enum.ctx, req)
-		}
-	}
+	// Check that this name has not already been processed
+	return f.checkFilter(req), nil
 }
 
-// OutputNames implements the FQDNManager interface.
-func (r *SubdomainManager) OutputNames(num int) []*requests.DNSRequest {
-	var results []*requests.DNSRequest
+func (f *fqdnFilter) checkFilter(req *requests.DNSRequest) *requests.DNSRequest {
+	f.Lock()
+	defer f.Unlock()
 
-	for i := 0; ; i++ {
-		if num >= 0 && i >= num {
-			break
-		}
+	if !req.Valid() {
+		return nil
+	}
+	// Check if it's time to reset our bloom filter due to number of elements seen
+	if f.count >= filterMaxSize {
+		f.count = 0
+		f.filter = stringfilter.NewBloomFilter(filterMaxSize)
+	}
 
-		element, ok := r.queue.Next()
-		if !ok {
-			break
-		}
+	trusted := requests.TrustedTag(req.Tag)
+	// Do not submit names from untrusted sources, after already receiving the name
+	// from a trusted source
+	if !trusted && f.filter.Has(req.Name+strconv.FormatBool(true)) {
+		f.queue.Append(req)
+		return nil
+	}
+	// At most, a FQDN will be accepted from an untrusted source first, and then
+	// reconsidered from a trusted data source
+	if f.filter.Duplicate(req.Name + strconv.FormatBool(trusted)) {
+		f.queue.Append(req)
+		return nil
+	}
 
+	f.count++
+	return req
+}
+
+// This goroutine ensures that duplicate names from other sources are shown in the Graph.
+func (f *fqdnFilter) processDupNames() {
+	uuid := f.enum.Config.UUID.String()
+
+	type altsource struct {
+		Name      string
+		Source    string
+		Tag       string
+		Timestamp time.Time
+	}
+	var pending []*altsource
+	each := func(element interface{}) {
 		req := element.(*requests.DNSRequest)
-		results = append(results, req)
+
+		pending = append(pending, &altsource{
+			Name:      req.Name,
+			Source:    req.Source,
+			Tag:       req.Tag,
+			Timestamp: time.Now(),
+		})
+	}
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+loop:
+	for {
+		select {
+		case <-f.enum.done:
+			break loop
+		case <-f.queue.Signal():
+			f.queue.Process(each)
+		case now := <-t.C:
+			var count int
+			for _, a := range pending {
+				if now.Before(a.Timestamp.Add(10 * time.Minute)) {
+					break
+				}
+				if _, err := f.enum.Graph.ReadNode(a.Name, "fqdn"); err == nil {
+					f.enum.Graph.InsertFQDN(a.Name, a.Source, a.Tag, uuid)
+				}
+				count++
+			}
+			pending = pending[count:]
+		}
 	}
 
-	return results
+	f.queue.Process(each)
+	for _, a := range pending {
+		if _, err := f.enum.Graph.ReadNode(a.Name, "fqdn"); err == nil {
+			f.enum.Graph.InsertFQDN(a.Name, a.Source, a.Tag, uuid)
+		}
+	}
 }
 
-// Stop implements the FQDNManager interface.
-func (r *SubdomainManager) Stop() error {
-	r.queue = new(queue.Queue)
+// subdomainTask handles newly discovered proper subdomain names in the enumeration.
+type subdomainTask struct {
+	enum      *Enumeration
+	queue     queue.Queue
+	timesChan chan *timesReq
+	done      chan struct{}
+}
+
+// newSubdomainTask returns an initialized SubdomainTask.
+func newSubdomainTask(e *Enumeration) *subdomainTask {
+	r := &subdomainTask{
+		enum:      e,
+		queue:     queue.NewQueue(),
+		timesChan: make(chan *timesReq, 10),
+		done:      make(chan struct{}, 2),
+	}
+
+	go r.timesManager()
+	return r
+}
+
+// Stop releases resources allocated by the instance.
+func (r *subdomainTask) Stop() error {
+	close(r.done)
+	r.queue = queue.NewQueue()
 	return nil
 }
 
-func (r *SubdomainManager) checkSubdomain(req *requests.DNSRequest) {
+// Process implements the pipeline Task interface.
+func (r *subdomainTask) Process(ctx context.Context, data pipeline.Data, tp pipeline.TaskParams) (pipeline.Data, error) {
+	req, ok := data.(*requests.DNSRequest)
+	if !ok {
+		return data, nil
+	}
+	if req == nil || !r.enum.Config.IsDomainInScope(req.Name) {
+		return nil, nil
+	}
+
+	labels := strings.Split(req.Name, ".")
+	// Do not further evaluate service subdomains
+	for _, label := range labels {
+		if label == "_tcp" || label == "_udp" || label == "_tls" {
+			return nil, nil
+		}
+	}
+
+	r.queue.Append(&requests.ResolvedRequest{
+		Name:    req.Name,
+		Domain:  req.Domain,
+		Records: append([]requests.DNSAnswer(nil), req.Records...),
+		Tag:     req.Tag,
+		Source:  req.Source,
+	})
+
+	return r.checkForSubdomains(ctx, req, tp)
+}
+
+func (r *subdomainTask) checkForSubdomains(ctx context.Context, req *requests.DNSRequest, tp pipeline.TaskParams) (pipeline.Data, error) {
 	labels := strings.Split(req.Name, ".")
 	num := len(labels)
 	// Is this large enough to consider further?
 	if num < 2 {
-		return
+		return req, nil
 	}
 	// It cannot have fewer labels than the root domain name
 	if num-1 < len(strings.Split(req.Domain, ".")) {
-		return
-	}
-	// Do not further evaluate service subdomains
-	if labels[1] == "_tcp" || labels[1] == "_udp" || labels[1] == "_tls" {
-		return
+		return req, nil
 	}
 
 	sub := strings.TrimSpace(strings.Join(labels[1:], "."))
-	for _, g := range r.enum.Sys.GraphDatabases() {
-		// CNAMEs are not a proper subdomain
-		if g.IsCNAMENode(sub) {
-			return
-		}
+	// CNAMEs are not a proper subdomain
+	if r.enum.Graph.IsCNAMENode(sub) {
+		return req, nil
 	}
 
-	subreq := &requests.DNSRequest{
+	subreq := &requests.SubdomainRequest{
 		Name:   sub,
 		Domain: req.Domain,
 		Tag:    req.Tag,
 		Source: req.Source,
-	}
-	times := r.timesForSubdomain(sub)
-
-	r.enum.Bus.Publish(requests.SubDiscoveredTopic, eventbus.PriorityHigh, r.enum.ctx, subreq, times)
-	// Queue the proper subdomain for future brute forcing
-	if r.enum.Config.BruteForcing && r.enum.Config.Recursive &&
-		r.enum.Config.MinForRecursive > 0 && r.enum.Config.MinForRecursive == times {
-		r.enum.bruteMgr.InputName(subreq)
-	}
-	// Check if the subdomain should be added to the markov model
-	if r.enum.Config.Alterations && r.enum.guessMgr != nil && times == 1 {
-		r.enum.guessMgr.AddSubdomain(sub)
+		Times:  r.timesForSubdomain(sub),
 	}
 
-	r.enum.srcsLock.Lock()
-	defer r.enum.srcsLock.Unlock()
-	// Let all the data sources know about the discovered proper subdomain
-	for _, src := range r.enum.Sys.DataSources() {
-		if r.enum.srcs.Has(src.String()) {
-			src.SubdomainDiscovered(r.enum.ctx, subreq, times)
-		}
+	r.queue.Append(subreq)
+	// First time this proper subdomain has been seen?
+	if sub != req.Domain && subreq.Times == 1 {
+		go pipeline.SendData(ctx, "root", subreq, tp)
 	}
+	return req, nil
 }
 
-func (r *SubdomainManager) timesForSubdomain(sub string) int {
-	r.Lock()
-	defer r.Unlock()
-
-	times, found := r.subdomains[sub]
-	if found {
-		times++
-	} else {
-		times = 1
+// OutputRequests sends discovered subdomain names to the enumeration data sources.
+func (r *subdomainTask) OutputRequests(num int) int {
+	if num <= 0 {
+		return 0
 	}
 
-	r.subdomains[sub] = times
-	return times
-}
-
-// NameManager handles the filtering and release of newly discovered FQDNs in the enumeration.
-type NameManager struct {
-	enum  *Enumeration
-	queue *queue.Queue
-}
-
-// NewNameManager returns an initialized NameManager.
-func NewNameManager(e *Enumeration) *NameManager {
-	return &NameManager{
-		enum:  e,
-		queue: new(queue.Queue),
-	}
-}
-
-// InputName implements the FQDNManager interface.
-func (r *NameManager) InputName(req *requests.DNSRequest) {
-	if req == nil || req.Name == "" || req.Domain == "" {
-		return
-	}
-
-	// Clean up the newly discovered name and domain
-	requests.SanitizeDNSRequest(req)
-
-	r.queue.Append(req)
-}
-
-// OutputNames implements the FQDNManager interface.
-func (r *NameManager) OutputNames(num int) []*requests.DNSRequest {
-	var results []*requests.DNSRequest
-
-	for i := 0; ; i++ {
-		if num >= 0 && i >= num {
-			break
-		}
-
+	var count int
+loop:
+	for {
 		element, ok := r.queue.Next()
 		if !ok {
 			break
 		}
 
-		req := element.(*requests.DNSRequest)
-		results = append(results, req)
+		for _, src := range r.enum.srcs {
+			switch v := element.(type) {
+			case *requests.ResolvedRequest:
+				src.Request(r.enum.ctx, v.Clone())
+			case *requests.SubdomainRequest:
+				src.Request(r.enum.ctx, v.Clone())
+			default:
+				continue loop
+			}
+			count++
+		}
+
+		if count >= num {
+			break
+		}
 	}
 
-	return results
+	return count
 }
 
-// Stop implements the FQDNManager interface.
-func (r *NameManager) Stop() error {
-	r.queue = new(queue.Queue)
-	return nil
+func (r *subdomainTask) timesForSubdomain(sub string) int {
+	ch := make(chan int, 2)
+
+	r.timesChan <- &timesReq{
+		Sub: sub,
+		Ch:  ch,
+	}
+
+	return <-ch
+}
+
+type timesReq struct {
+	Sub string
+	Ch  chan int
+}
+
+func (r *subdomainTask) timesManager() {
+	subdomains := make(map[string]int)
+
+	for {
+		select {
+		case <-r.done:
+			return
+		case req := <-r.timesChan:
+			times, found := subdomains[req.Sub]
+			if found {
+				times++
+			} else {
+				times = 1
+			}
+
+			subdomains[req.Sub] = times
+			req.Ch <- times
+		}
+	}
 }

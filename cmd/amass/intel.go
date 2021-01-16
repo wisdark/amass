@@ -4,8 +4,8 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -18,10 +18,11 @@ import (
 	"time"
 
 	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/datasrcs"
 	"github.com/OWASP/Amass/v3/format"
 	"github.com/OWASP/Amass/v3/intel"
-	"github.com/OWASP/Amass/v3/services"
-	"github.com/OWASP/Amass/v3/stringset"
+	"github.com/OWASP/Amass/v3/systems"
+	"github.com/caffix/stringset"
 	"github.com/fatih/color"
 )
 
@@ -136,21 +137,6 @@ func runIntelCommand(clArgs []string) {
 		return
 	}
 
-	// Check if the user has requested the data source names
-	if args.Options.ListSources {
-		for _, name := range GetAllSourceNames() {
-			g.Println(name)
-		}
-		return
-	}
-
-	// Some input validation
-	if !args.Options.ReverseWhois && args.OrganizationName == "" &&
-		len(args.Addresses) == 0 && len(args.CIDRs) == 0 && len(args.ASNs) == 0 {
-		commandUsage(intelUsageMsg, intelCommand, intelBuf)
-		os.Exit(1)
-	}
-
 	if (len(args.Excluded) > 0 || args.Filepaths.ExcludedSrcs != "") &&
 		(len(args.Included) > 0 || args.Filepaths.IncludedSrcs != "") {
 		commandUsage(intelUsageMsg, intelCommand, intelBuf)
@@ -161,10 +147,10 @@ func runIntelCommand(clArgs []string) {
 	rand.Seed(time.Now().UTC().UnixNano())
 
 	if args.OrganizationName != "" {
-		records, err := config.LookupASNsByName(args.OrganizationName)
+		asns, descs, err := config.LookupASNsByName(args.OrganizationName)
 		if err == nil {
-			for _, a := range records {
-				fmt.Printf("%d, %s\n", a.ASN, a.Description)
+			for i, a := range asns {
+				fmt.Printf("%d, %s\n", a, descs[i])
 			}
 		} else {
 			fmt.Printf("%v\n", err)
@@ -195,6 +181,21 @@ func runIntelCommand(clArgs []string) {
 		os.Exit(1)
 	}
 
+	// Check if the user has requested the data source names
+	if args.Options.ListSources {
+		for _, info := range GetAllSourceInfo(cfg) {
+			g.Println(info)
+		}
+		return
+	}
+
+	// Some input validation
+	if !args.Options.ReverseWhois && args.OrganizationName == "" &&
+		len(args.Addresses) == 0 && len(args.CIDRs) == 0 && len(args.ASNs) == 0 {
+		commandUsage(intelUsageMsg, intelCommand, intelBuf)
+		os.Exit(1)
+	}
+
 	rLog, wLog := io.Pipe()
 	cfg.Log = log.New(wLog, "", log.Lmicroseconds)
 	logfile := filepath.Join(config.OutputDirectory(cfg.Dir), "amass.log")
@@ -205,12 +206,13 @@ func runIntelCommand(clArgs []string) {
 	createOutputDirectory(cfg)
 	go writeLogsAndMessages(rLog, logfile, args.Options.Verbose)
 
-	sys, err := services.NewLocalSystem(cfg)
+	sys, err := systems.NewLocalSystem(cfg)
 	if err != nil {
 		return
 	}
+	sys.SetDataSources(datasrcs.GetAllSources(sys))
 
-	ic := intel.NewCollection(sys)
+	ic := intel.NewCollection(cfg, sys)
 	if ic == nil {
 		r.Fprintf(color.Error, "%s\n", "No DNS resolvers passed the sanity check")
 		os.Exit(1)
@@ -228,10 +230,29 @@ func runIntelCommand(clArgs []string) {
 		args.Options.IPv6 = false
 		go ic.ReverseWhois()
 	} else {
-		go ic.HostedDomains()
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if args.Timeout == 0 {
+			ctx, cancel = context.WithCancel(context.Background())
+		} else {
+			ctx, cancel = context.WithTimeout(context.Background(), time.Duration(args.Timeout)*time.Minute)
+		}
+		defer cancel()
+		// Monitor for cancellation by the user
+		go func() {
+			quit := make(chan os.Signal, 1)
+			signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+			select {
+			case <-quit:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+
+		go ic.HostedDomains(ctx)
 	}
 
-	go intelSignalHandler(ic)
 	processIntelOutput(ic, &args)
 }
 
@@ -261,58 +282,17 @@ func processIntelOutput(ic *intel.Collection, args *intelArgs) {
 
 	// Collect all the names returned by the intelligence collection
 	for out := range ic.Output {
-		source, name, ips := format.OutputLineParts(out, args.Options.Sources,
+		source, _, ips := format.OutputLineParts(out, args.Options.Sources,
 			args.Options.IPs || args.Options.IPv4 || args.Options.IPv6, args.Options.DemoMode)
 
 		if ips != "" {
 			ips = " " + ips
 		}
 
-		fmt.Fprintf(color.Output, "%s%s%s\n", blue(source), green(name), yellow(ips))
+		fmt.Fprintf(color.Output, "%s%s%s\n", blue(source), green(out.Domain), yellow(ips))
 		// Handle writing the line to a specified output file
 		if outptr != nil {
-			fmt.Fprintf(outptr, "%s%s%s\n", source, name, ips)
-		}
-	}
-}
-
-// If the user interrupts the program, print the summary information
-func intelSignalHandler(ic *intel.Collection) {
-	quit := make(chan os.Signal, 1)
-
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-	ic.Done()
-}
-
-func writeIntelLogsAndMessages(logs *io.PipeReader, logfile string) {
-	var filePtr *os.File
-	if logfile != "" {
-		var err error
-
-		filePtr, err = os.OpenFile(logfile, os.O_WRONLY|os.O_CREATE, 0644)
-		if err != nil {
-			r.Fprintf(color.Error, "Failed to open the log file: %v\n", err)
-		} else {
-			defer func() {
-				filePtr.Sync()
-				filePtr.Close()
-			}()
-			filePtr.Truncate(0)
-			filePtr.Seek(0, 0)
-		}
-	}
-
-	scanner := bufio.NewScanner(logs)
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if err := scanner.Err(); err != nil {
-			fmt.Fprintf(color.Error, "Error reading the Amass logs: %v\n", err)
-			break
-		}
-		if filePtr != nil {
-			fmt.Fprintln(filePtr, line)
+			fmt.Fprintf(outptr, "%s%s%s\n", source, out.Domain, ips)
 		}
 	}
 }
@@ -376,17 +356,14 @@ func (i intelArgs) OverrideConfig(conf *config.Config) error {
 	if i.Filepaths.Directory != "" {
 		conf.Dir = i.Filepaths.Directory
 	}
-	if i.MaxDNSQueries > 0 {
-		conf.MaxDNSQueries = i.MaxDNSQueries
-	}
-	if i.Timeout > 0 {
-		conf.Timeout = i.Timeout
-	}
-	if i.Options.Verbose == true {
+	if i.Options.Verbose {
 		conf.Verbose = true
 	}
 	if i.Resolvers.Len() > 0 {
-		conf.SetResolvers(i.Resolvers.Slice())
+		conf.SetResolvers(i.Resolvers.Slice()...)
+	}
+	if i.MaxDNSQueries > 0 {
+		conf.MaxDNSQueries = i.MaxDNSQueries
 	}
 	if !i.Options.MonitorResolverRate {
 		conf.MonitorResolverRate = false
@@ -401,6 +378,6 @@ func (i intelArgs) OverrideConfig(conf *config.Config) error {
 	}
 
 	// Attempt to add the provided domains to the configuration
-	conf.AddDomains(i.Domains.Slice())
+	conf.AddDomains(i.Domains.Slice()...)
 	return nil
 }
