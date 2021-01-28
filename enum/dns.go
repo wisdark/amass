@@ -20,7 +20,6 @@ import (
 // InitialQueryTypes include the DNS record types that are queried for a discovered name.
 var InitialQueryTypes = []uint16{
 	dns.TypeCNAME,
-	dns.TypeTXT,
 	dns.TypeA,
 	dns.TypeAAAA,
 }
@@ -46,15 +45,15 @@ func (dt *dNSTask) makeBlacklistTaskFunc() pipeline.TaskFunc {
 		var name string
 		switch v := data.(type) {
 		case *requests.DNSRequest:
-			if v != nil {
+			if v != nil && v.Valid() {
 				name = v.Name
 			}
 		case *requests.ResolvedRequest:
-			if v != nil {
+			if v != nil && v.Valid() {
 				name = v.Name
 			}
 		case *requests.SubdomainRequest:
-			if v != nil {
+			if v != nil && v.Valid() {
 				name = v.Name
 			}
 		case *requests.ZoneXFRRequest:
@@ -121,13 +120,19 @@ func (dt *dNSTask) Process(ctx context.Context, data pipeline.Data, tp pipeline.
 	case *requests.DNSRequest:
 		return dt.processDNSRequest(ctx, v, tp)
 	case *requests.AddrRequest:
-		dt.reverseDNSQuery(ctx, v.Address, tp)
+		if dt.reverseDNSQuery(ctx, v.Address, tp) || v.InScope {
+			return data, nil
+		}
+		return nil, nil
 	}
 
 	return data, nil
 }
 
 func (dt *dNSTask) processDNSRequest(ctx context.Context, req *requests.DNSRequest, tp pipeline.TaskParams) (pipeline.Data, error) {
+	if req == nil || !req.Valid() {
+		return nil, nil
+	}
 loop:
 	for _, t := range InitialQueryTypes {
 		select {
@@ -136,9 +141,18 @@ loop:
 		default:
 		}
 
+		var nxdomain bool
 		msg := resolvers.QueryMsg(req.Name, t)
-		if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityLow,
-			resolvers.PoolRetryPolicy); err == nil && resp != nil && len(resp.Answer) > 0 {
+		resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityLow, func(times, priority int, m *dns.Msg) bool {
+			// Try one more time if we receive NXDOMAIN
+			if m.Rcode == dns.RcodeNameError && !nxdomain {
+				nxdomain = true
+				return true
+			}
+			return resolvers.PoolRetryPolicy(times, priority, m)
+		})
+
+		if err == nil && resp != nil && len(resp.Answer) > 0 {
 			if !requests.TrustedTag(req.Tag) &&
 				dt.enum.Sys.Pool().WildcardType(ctx, resp, req.Domain) != resolvers.WildcardTypeNone {
 				break
@@ -155,6 +169,9 @@ loop:
 			}
 
 			req.Records = append(req.Records, convertAnswers(rr)...)
+			if t == dns.TypeCNAME {
+				break
+			}
 		} else {
 			if err != nil && err.Error() == "All resolvers have been stopped" {
 				return nil, err
@@ -163,7 +180,7 @@ loop:
 		}
 	}
 
-	if req.Valid() && len(req.Records) > 0 {
+	if len(req.Records) > 0 {
 		return req, nil
 	}
 	return nil, nil
@@ -290,41 +307,49 @@ func (dt *dNSTask) queryServiceNames(ctx context.Context, req *requests.DNSReque
 	}
 }
 
-func (dt *dNSTask) reverseDNSQuery(ctx context.Context, addr string, tp pipeline.TaskParams) {
+func (dt *dNSTask) reverseDNSQuery(ctx context.Context, addr string, tp pipeline.TaskParams) bool {
 	msg := resolvers.ReverseMsg(addr)
 	if msg == nil {
-		return
+		return false
 	}
 
-	resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityLow, resolvers.PoolRetryPolicy)
+	var nxdomain bool
+	resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityLow, func(times, priority int, m *dns.Msg) bool {
+		// Try one more time if we receive NXDOMAIN
+		if m.Rcode == dns.RcodeNameError && !nxdomain {
+			nxdomain = true
+			return true
+		}
+		return resolvers.PoolRetryPolicy(times, priority, m)
+	})
 	if err != nil {
-		return
+		return false
 	}
 
 	ans := resolvers.ExtractAnswers(resp)
 	if len(ans) == 0 {
-		return
+		return false
 	}
 
 	rr := resolvers.AnswersByType(ans, dns.TypePTR)
 	if len(rr) == 0 {
-		return
+		return false
 	}
 
 	answer := strings.ToLower(resolvers.RemoveLastDot(rr[0].Data))
 	if _, ok := dns.IsDomainName(answer); !ok {
-		return
+		return false
 	}
 
 	// Check that the name discovered is in scope
 	if dt.enum.Config.WhichDomain(answer) == "" {
-		return
+		return false
 	}
 
 	ptr := resolvers.RemoveLastDot(rr[0].Name)
 	domain, err := publicsuffix.EffectiveTLDPlusOne(ptr)
 	if err != nil {
-		return
+		return true
 	}
 
 	go pipeline.SendData(ctx, "filter", &requests.DNSRequest{
@@ -339,6 +364,7 @@ func (dt *dNSTask) reverseDNSQuery(ctx context.Context, addr string, tp pipeline
 		Tag:    requests.DNS,
 		Source: "Reverse DNS",
 	}, tp)
+	return true
 }
 
 func convertAnswers(ans []*resolvers.ExtractedAnswer) []requests.DNSAnswer {

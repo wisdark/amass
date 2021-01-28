@@ -7,7 +7,7 @@ name = "HackerTarget"
 type = "api"
 
 function start()
-    setratelimit(2)
+    setratelimit(1)
 end
 
 function vertical(ctx, domain)
@@ -32,7 +32,7 @@ function asn(ctx, addr)
     if (resp == nil or resp == "") then
         local err
 
-        resp, err = request({url=aurl})
+        resp, err = request(ctx, {url=aurl})
         if (err ~= nil and err ~= "") then
             return
         end

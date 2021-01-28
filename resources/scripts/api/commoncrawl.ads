@@ -49,7 +49,7 @@ function indexurls(ctx)
     if (resp == nil or resp == "") then
         local err
 
-        resp, err = request({
+        resp, err = request(ctx, {
             url=iurl,
             headers={['Content-Type']="application/json"},
         })
