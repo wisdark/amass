@@ -1,4 +1,4 @@
--- Copyright 2017 Jeff Foley. All rights reserved.
+-- Copyright 2017-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 local json = require("json")
@@ -34,30 +34,15 @@ function vertical(ctx, domain)
         return
     end
 
-    local resp
-    local vurl = verturl(domain)
-    -- Check if the response data is in the graph database
-    if (cfg.ttl ~= nil and cfg.ttl > 0) then
-        resp = obtain_response(vurl, cfg.ttl)
-    end
-
-    if (resp == nil or resp == "") then
-        local err
-
-        resp, err = request(ctx, {
-            url=vurl,
-            headers={
-                APIKEY=c.key,
-                ['Content-Type']="application/json",
-            },
-        })
-        if (err ~= nil and err ~= "") then
-            return
-        end
-
-        if (cfg.ttl ~= nil and cfg.ttl > 0) then
-            cache_response(vurl, resp)
-        end
+    local resp, err = request(ctx, {
+        url=verturl(domain),
+        headers={
+            APIKEY=c.key,
+            ['Content-Type']="application/json",
+        },
+    })
+    if (err ~= nil and err ~= "") then
+        return
     end
 
     local j = json.decode(resp)
@@ -76,13 +61,13 @@ end
 
 function sendnames(ctx, content)
     local names = find(content, subdomainre)
-    if names == nil then
+    if (names == nil) then
         return
     end
 
     local found = {}
     for i, v in pairs(names) do
-        if found[v] == nil then
+        if (found[v] == nil) then
             newname(ctx, v)
             found[v] = true
         end
@@ -100,30 +85,15 @@ function horizontal(ctx, domain)
         return
     end
 
-    local resp
-    local hurl = horizonurl(domain)
-    -- Check if the response data is in the graph database
-    if (cfg.ttl ~= nil and cfg.ttl > 0) then
-        resp = obtain_response(hurl, cfg.ttl)
-    end
-
-    if (resp == nil or resp == "") then
-        local err
-
-        resp, err = request(ctx, {
-            url=hurl,
-            headers={
-                APIKEY=c.key,
-                ['Content-Type']="application/json",
-            },
-        })
-        if (err ~= nil and err ~= "") then
-            return
-        end
-
-        if (cfg.ttl ~= nil and cfg.ttl > 0) then
-            cache_response(hurl, resp)
-        end
+    local resp, err = request(ctx, {
+        url=horizonurl(domain),
+        headers={
+            APIKEY=c.key,
+            ['Content-Type']="application/json",
+        },
+    })
+    if (err ~= nil and err ~= "") then
+        return
     end
 
     local j = json.decode(resp)
@@ -131,15 +101,10 @@ function horizontal(ctx, domain)
         return
     end
 
-    assoc = {}
     for i, r in pairs(j.records) do
-        if r.hostname ~= "" then
-            table.insert(assoc, r.hostname)
+        if (r.hostname ~= "") then
+            associated(ctx, domain, r.hostname)
         end
-    end
-
-    for i, a in pairs(assoc) do
-        associated(ctx, domain, a)
     end
 end
 

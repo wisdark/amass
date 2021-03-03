@@ -21,19 +21,16 @@ func GetAllSources(sys systems.System) []service.Service {
 	srvs := []service.Service{
 		NewAlienVault(sys),
 		NewCloudflare(sys),
-		NewCrtsh(sys),
 		NewDNSDB(sys),
 		NewDNSDumpster(sys),
 		NewNetworksDB(sys),
 		NewPastebin(sys),
 		NewRADb(sys),
-		NewRobtex(sys),
 		NewShadowServer(sys),
 		NewTeamCymru(sys),
 		NewTwitter(sys),
 		NewUmbrella(sys),
 		NewURLScan(sys),
-		NewViewDNS(sys),
 		NewWhoisXML(sys),
 	}
 
@@ -80,22 +77,6 @@ func SelectedDataSources(cfg *config.Config, avail []service.Service) []service.
 	return results
 }
 
-func genNewNameEvent(ctx context.Context, sys systems.System, srv service.Service, name string) {
-	cfg, bus, err := ContextConfigBus(ctx)
-	if err != nil {
-		return
-	}
-
-	if domain := cfg.WhichDomain(name); domain != "" {
-		bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
-			Name:   name,
-			Domain: domain,
-			Tag:    srv.Description(),
-			Source: srv.String(),
-		})
-	}
-}
-
 // ContextConfigBus extracts the Config and EventBus references from the Context argument.
 func ContextConfigBus(ctx context.Context) (*config.Config, *eventbus.EventBus, error) {
 	var ok bool
@@ -123,8 +104,34 @@ func ContextConfigBus(ctx context.Context) (*config.Config, *eventbus.EventBus, 
 	return cfg, bus, nil
 }
 
+func genNewNameEvent(ctx context.Context, sys systems.System, srv service.Service, name string) {
+	cfg, bus, err := ContextConfigBus(ctx)
+	if err != nil {
+		return
+	}
+
+	if domain := cfg.WhichDomain(name); domain != "" {
+		bus.Publish(requests.NewNameTopic, eventbus.PriorityHigh, &requests.DNSRequest{
+			Name:   name,
+			Domain: domain,
+			Tag:    srv.Description(),
+			Source: srv.String(),
+		})
+	}
+}
+
 func numRateLimitChecks(srv service.Service, num int) {
 	for i := 0; i < num; i++ {
 		srv.CheckRateLimit()
 	}
+}
+
+func checkContextExpired(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return errors.New("Context expired")
+	default:
+	}
+
+	return nil
 }

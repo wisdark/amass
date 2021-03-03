@@ -6,7 +6,6 @@ package config
 import (
 	"bufio"
 	"compress/gzip"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -22,7 +21,6 @@ import (
 	"sync"
 
 	_ "github.com/OWASP/Amass/v3/config/statik" // The content being embedded into the binary
-	amasshttp "github.com/OWASP/Amass/v3/net/http"
 	"github.com/OWASP/Amass/v3/wordlist"
 	"github.com/caffix/stringset"
 	"github.com/go-ini/ini"
@@ -154,7 +152,7 @@ func NewConfig() *Config {
 	c := &Config{
 		UUID:                uuid.New(),
 		Log:                 log.New(ioutil.Discard, "", 0),
-		Ports:               []int{443},
+		Ports:               []int{80, 443},
 		MinForRecursive:     1,
 		MonitorResolverRate: true,
 		LocalDatabase:       true,
@@ -167,6 +165,7 @@ func NewConfig() *Config {
 		MinForWordFlip: 2,
 		EditDistance:   1,
 		Recursive:      true,
+		MinimumTTL:     1440,
 	}
 
 	c.calcDNSQueriesMax()
@@ -230,8 +229,8 @@ func (c *Config) LoadSettings(path string) error {
 		return fmt.Errorf("Error mapping configuration settings to internal values: %v", err)
 	}
 	// Attempt to load a special mode of operation specified by the user
-	if cfg.Section(ini.DEFAULT_SECTION).HasKey("mode") {
-		mode := cfg.Section(ini.DEFAULT_SECTION).Key("mode").String()
+	if cfg.Section(ini.DefaultSection).HasKey("mode") {
+		mode := cfg.Section(ini.DefaultSection).Key("mode").String()
 
 		if mode == "passive" {
 			c.Passive = true
@@ -330,14 +329,6 @@ func GetListFromFile(path string) ([]string, error) {
 
 	s, err := getWordList(reader)
 	return s, err
-}
-
-func getWordlistByURL(ctx context.Context, url string) ([]string, error) {
-	page, err := amasshttp.RequestWebPage(ctx, url, nil, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to obtain the wordlist at %s: %v", url, err)
-	}
-	return getWordList(strings.NewReader(page))
 }
 
 func getWordlistByFS(path string) ([]string, error) {

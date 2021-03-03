@@ -35,6 +35,7 @@ The `type` field provides the category of the data source implemented by the scr
 | "dns"       | DNS Queries |
 | "axfr"      | DNS Zone Transfers |
 | "scrape"    | Web Scraping |
+| "crawl"     | Web Crawling |
 | "api"       | Various APIs |
 | "cert"      | TLS Certificates |
 | "archive"   | Web Archives |
@@ -122,7 +123,7 @@ Amass executes the `resolved` callback function after successfully resolving the
 
 ```lua
 function resolved(ctx, name, domain, records)
-    crawl(ctx, "https://" .. name))
+    crawl(ctx, "https://" .. name, 0)
 end
 ```
 
@@ -148,7 +149,7 @@ Amass executes the `subdomain` callback function after successfully resolving th
 ```lua
 function subdomain(ctx, name, domain, times)
     if times == 1 then
-        crawl(ctx, "https://" .. name))
+        crawl(ctx, "https://" .. name, 0)
     end
 end
 ```
@@ -180,11 +181,11 @@ end
 
 ### `asn` Callback
 
-Amass executes the `asn` callback function when attempting to obtain autonomous system (AS) information from a provide IP address and IP that is within scope. The function is provided an IP address that is within scope and the script sends back the information for the associated AS using the `newasn` (more about this below) function.
+Amass executes the `asn` callback function when attempting to obtain autonomous system (AS) information from the provided IP address and/or AS number. The function is provided an IP address and/or AS number that is within scope and the script sends back the information for the associated AS using the `newasn` (more about this below) function.
 
 ```lua
-function asn(ctx, addr)
-    -- Send back a related AS information
+function asn(ctx, addr, asn)
+    -- Send back the related AS information
     newasn(ctx, {
         ['addr']=addr,
         ['asn']=tonumber(asn),
@@ -198,6 +199,7 @@ end
 |:-----------|:----------|
 | ctx        | UserData  |
 | addr       | string    |
+| asn        | number    |
 
 ### `config` Function
 
@@ -335,7 +337,7 @@ A script can check if a FQDN is in scope of the enumeration process by executing
 ```lua
 function get_names(ctx, sub)
     if inscope(ctx, sub) then
-        crawl(ctx, "https://" .. sub))
+        crawl(ctx, "https://" .. sub, 0)
     end
 end
 ```
@@ -368,7 +370,7 @@ function vertical(ctx, domain)
     -- Obtain several subdomain names
     for i, n in pairs(subs) do
         checkratelimit()
-        crawl(ctx, "https://" .. n))
+        crawl(ctx, "https://" .. n, 0)
     end
 end
 ```
@@ -469,7 +471,7 @@ The `params` table has the following fields:
 
 ### `scrape` Function
 
-The `scrape` function performs HTTP(s) client requests for Amass data source scripts. The function returns a boolean value indicating the success of the client request. The body of the response is automatically checked for subdomain names that are in scope of the enumeration process. The function accepts an options table that can include the fields shown below.
+The `scrape` function performs HTTP(s) client requests for Amass data source scripts. The body of the response is automatically checked for subdomain names that are in scope of the enumeration process. The function returns a boolean value indicating the success of the client request, and it also returns `false` if no subdomain was found in the body. The function accepts an options table that can include the fields shown below.
 
 ```lua
 function vertical(ctx, domain)
@@ -563,16 +565,17 @@ end
 
 ### `newasn` Function
 
-The `newasn` function allows Amass data source scripts to submit discovered autonomous system information related to the provided `addr` parameter. The function accepts a table of return values that is defined below.
+The `newasn` function allows Amass data source scripts to submit discovered autonomous system information related to the provided `addr` or `asn` parameters. The function accepts a table of return values that is defined below.
 
 ```lua
-function asn(ctx, addr)
-    -- Send back a related AS information
+function asn(ctx, addr, asn)
+    -- Send back the related AS information
     newasn(ctx, {
         ['addr']=addr,
         ['asn']=tonumber(asn),
-        ['desc']=desc,
         prefix=cidr,
+        ['desc']=desc,
+        ['netblocks']={cidr},
     })
 end
 ```
@@ -581,5 +584,8 @@ end
 |:-----------|:----------|
 | addr       | string    |
 | asn        | number    |
-| desc       | string    |
 | prefix     | string    |
+| cc         | string    |
+| registry   | string    |
+| desc       | string    |
+| netblocks  | table     |

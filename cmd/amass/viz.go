@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package main
@@ -162,7 +162,7 @@ func runVizCommand(clArgs []string) {
 	fgY.Fprintln(color.Error, "Could take a moment while acquiring AS network information")
 	// Migrate the changes back to the persistent db
 	if healASInfo(uuids, memDB) {
-		memDB.MigrateEvents(db, uuids...)
+		_ = memDB.MigrateEvents(db, uuids...)
 	}
 
 	// Obtain the visualization nodes & edges from the graph
@@ -181,47 +181,56 @@ func runVizCommand(clArgs []string) {
 
 	if args.Options.D3 {
 		path := filepath.Join(dir, "amass_d3.html")
-		writeGraphOutputFile("d3", path, nodes, edges)
+		err = writeGraphOutputFile("d3", path, nodes, edges)
 	}
 	if args.Options.DOT {
 		path := filepath.Join(dir, "amass.dot")
-		writeGraphOutputFile("dot", path, nodes, edges)
+		err = writeGraphOutputFile("dot", path, nodes, edges)
 	}
 	if args.Options.GEXF {
 		path := filepath.Join(dir, "amass.gexf")
-		writeGraphOutputFile("gexf", path, nodes, edges)
+		err = writeGraphOutputFile("gexf", path, nodes, edges)
 	}
 	if args.Options.Graphistry {
 		path := filepath.Join(dir, "amass_graphistry.json")
-		writeGraphOutputFile("graphistry", path, nodes, edges)
+		err = writeGraphOutputFile("graphistry", path, nodes, edges)
 	}
 	if args.Options.Maltego {
 		path := filepath.Join(dir, "amass_maltego.csv")
-		writeGraphOutputFile("maltego", path, nodes, edges)
+		err = writeGraphOutputFile("maltego", path, nodes, edges)
+	}
+
+	if err != nil {
+		r.Fprintf(color.Error, "Failed to write the output file: %v\n", err)
+		os.Exit(1)
 	}
 }
 
-func writeGraphOutputFile(t string, path string, nodes []viz.Node, edges []viz.Edge) {
+func writeGraphOutputFile(t string, path string, nodes []viz.Node, edges []viz.Edge) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
-		return
+		return err
 	}
-	defer f.Close()
-	f.Truncate(0)
-	f.Seek(0, 0)
+	defer func() {
+		_ = f.Sync()
+		_ = f.Close()
+	}()
+
+	_ = f.Truncate(0)
+	_, _ = f.Seek(0, 0)
 
 	switch t {
 	case "d3":
-		viz.WriteD3Data(f, nodes, edges)
+		err = viz.WriteD3Data(f, nodes, edges)
 	case "dot":
-		viz.WriteDOTData(f, nodes, edges)
+		err = viz.WriteDOTData(f, nodes, edges)
 	case "gexf":
-		viz.WriteGEXFData(f, nodes, edges)
+		err = viz.WriteGEXFData(f, nodes, edges)
 	case "graphistry":
-		viz.WriteGraphistryData(f, nodes, edges)
+		err = viz.WriteGraphistryData(f, nodes, edges)
 	case "maltego":
 		viz.WriteMaltegoData(f, nodes, edges)
 	}
 
-	f.Sync()
+	return err
 }

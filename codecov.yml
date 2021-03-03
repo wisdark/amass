@@ -3,3 +3,24 @@ codecov:
 
 fixes:
   - "github.com/OWASP/Amass/v3/::github.com/OWASP/Amass/"
+
+ignore:
+  - encode_optype.go
+  - ./examples/**/*
+  - ./resources/**/*
+  - ./wordlist/**/*
+  - ./doc/**/*
+
+coverage:
+  range: 20..60
+  round: down
+  precision: 2
+
+comment:
+  layout: "reach, diff, files"
+  behavior: new
+  require_changes: true
+  require_base: yes
+  require_head: yes
+  branches:
+    - "develop"
