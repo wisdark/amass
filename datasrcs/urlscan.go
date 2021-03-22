@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package datasrcs
@@ -60,11 +60,12 @@ func (u *URLScan) OnStart() error {
 func (u *URLScan) OnRequest(ctx context.Context, args service.Args) {
 	if req, ok := args.(*requests.DNSRequest); ok {
 		u.dnsRequest(ctx, req)
+		u.CheckRateLimit()
 	}
 }
 
 func (u *URLScan) dnsRequest(ctx context.Context, req *requests.DNSRequest) {
-	cfg, bus, err := ContextConfigBus(ctx)
+	cfg, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
@@ -126,7 +127,7 @@ func (u *URLScan) dnsRequest(ctx context.Context, req *requests.DNSRequest) {
 func (u *URLScan) getSubsFromResult(ctx context.Context, id string) (stringset.Set, error) {
 	subs := stringset.New()
 
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return subs, errors.New("Failed to access the event bus")
 	}
@@ -152,7 +153,7 @@ func (u *URLScan) getSubsFromResult(ctx context.Context, id string) (stringset.S
 }
 
 func (u *URLScan) attemptSubmission(ctx context.Context, domain string) string {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return ""
 	}

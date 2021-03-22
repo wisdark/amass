@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package datasrcs
@@ -92,6 +92,7 @@ func (r *RADb) registryRADbURL(registry string) string {
 func (r *RADb) OnRequest(ctx context.Context, args service.Args) {
 	if req, ok := args.(*requests.ASNRequest); ok {
 		r.asnRequest(ctx, req)
+		r.CheckRateLimit()
 	}
 }
 
@@ -110,7 +111,7 @@ func (r *RADb) asnRequest(ctx context.Context, req *requests.ASNRequest) {
 }
 
 func (r *RADb) executeASNAddrQuery(ctx context.Context, addr string) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
@@ -166,7 +167,7 @@ func (r *RADb) getIPURL(registry, addr string) string {
 }
 
 func (r *RADb) executeASNQuery(ctx context.Context, asn int, addr, prefix string) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
@@ -253,7 +254,7 @@ func (r *RADb) getASNURL(registry, asn string) string {
 func (r *RADb) netblocks(ctx context.Context, asn int) stringset.Set {
 	netblocks := stringset.New()
 
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return netblocks
 	}
@@ -321,7 +322,7 @@ func (r *RADb) getNetblocksURL(asn string) string {
 }
 
 func (r *RADb) ipToASN(ctx context.Context, cidr string) int {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return 0
 	}

@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package datasrcs
@@ -104,11 +104,12 @@ func (w *WhoisXML) checkConfig() error {
 func (w *WhoisXML) OnRequest(ctx context.Context, args service.Args) {
 	if req, ok := args.(*requests.WhoisRequest); ok {
 		w.whoisRequest(ctx, req)
+		w.CheckRateLimit()
 	}
 }
 
 func (w *WhoisXML) whoisRequest(ctx context.Context, req *requests.WhoisRequest) {
-	cfg, bus, err := ContextConfigBus(ctx)
+	cfg, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
