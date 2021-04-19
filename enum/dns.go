@@ -8,10 +8,11 @@ import (
 	"fmt"
 	"strings"
 
+	amassdns "github.com/OWASP/Amass/v3/net/dns"
 	"github.com/OWASP/Amass/v3/requests"
 	"github.com/caffix/eventbus"
 	"github.com/caffix/pipeline"
-	"github.com/caffix/resolvers"
+	"github.com/caffix/resolve"
 	"github.com/miekg/dns"
 	"golang.org/x/net/publicsuffix"
 )
@@ -98,9 +99,6 @@ func (dt *dNSTask) makeRootTaskFunc() pipeline.TaskFunc {
 			return data, nil
 		}
 
-		tp.NewData() <- r
-		defer func() { tp.ProcessedData() <- r }()
-
 		dt.subdomainQueries(ctx, r, tp)
 		dt.queryServiceNames(ctx, r, tp)
 		return data, nil
@@ -141,28 +139,28 @@ loop:
 		}
 
 		var nxdomain bool
-		msg := resolvers.QueryMsg(req.Name, t)
-		resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityLow, func(times, priority int, m *dns.Msg) bool {
+		msg := resolve.QueryMsg(req.Name, t)
+		resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityLow, func(times, priority int, m *dns.Msg) bool {
 			// Try one more time if we receive NXDOMAIN
 			if m.Rcode == dns.RcodeNameError && !nxdomain {
 				nxdomain = true
 				return true
 			}
-			return resolvers.PoolRetryPolicy(times, priority, m)
+			return resolve.PoolRetryPolicy(times, priority, m)
 		})
 
 		if err == nil && resp != nil && len(resp.Answer) > 0 {
 			if !requests.TrustedTag(req.Tag) &&
-				dt.enum.Sys.Pool().WildcardType(ctx, resp, req.Domain) != resolvers.WildcardTypeNone {
+				dt.enum.Sys.Pool().WildcardType(ctx, resp, req.Domain) != resolve.WildcardTypeNone {
 				break
 			}
 
-			ans := resolvers.ExtractAnswers(resp)
+			ans := resolve.ExtractAnswers(resp)
 			if len(ans) == 0 {
 				continue
 			}
 
-			rr := resolvers.AnswersByType(ans, t)
+			rr := resolve.AnswersByType(ans, t)
 			if len(rr) == 0 {
 				continue
 			}
@@ -191,13 +189,13 @@ func (dt *dNSTask) handleResolverError(ctx context.Context, e error) {
 		return
 	}
 
-	rerr, ok := e.(*resolvers.ResolveError)
+	rerr, ok := e.(*resolve.ResolveError)
 	if !ok {
 		return
 	}
 
-	if rcode := rerr.Rcode; !cfg.Verbose && (rcode == resolvers.TimeoutRcode ||
-		rcode == resolvers.ResolverErrRcode || rcode == dns.RcodeNameError || rcode == dns.RcodeServerFailure) {
+	if rcode := rerr.Rcode; !cfg.Verbose && (rcode == resolve.TimeoutRcode ||
+		rcode == resolve.ResolverErrRcode || rcode == dns.RcodeNameError || rcode == dns.RcodeServerFailure) {
 		return
 	}
 
@@ -205,14 +203,14 @@ func (dt *dNSTask) handleResolverError(ctx context.Context, e error) {
 }
 
 func (dt *dNSTask) subdomainQueries(ctx context.Context, req *requests.DNSRequest, tp pipeline.TaskParams) {
-	msg := resolvers.QueryMsg(req.Name, dns.TypeNS)
+	msg := resolve.QueryMsg(req.Name, dns.TypeNS)
 	// Obtain the DNS answers for the NS records related to the domain
-	if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityHigh, resolvers.PoolRetryPolicy); err == nil {
-		ans := resolvers.ExtractAnswers(resp)
-		rr := resolvers.AnswersByType(ans, dns.TypeNS)
+	if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityHigh, resolve.PoolRetryPolicy); err == nil {
+		ans := resolve.ExtractAnswers(resp)
+		rr := resolve.AnswersByType(ans, dns.TypeNS)
 
 		for _, a := range rr {
-			go pipeline.SendData(ctx, "active", &requests.ZoneXFRRequest{
+			pipeline.SendData(ctx, "active", &requests.ZoneXFRRequest{
 				Name:   req.Name,
 				Domain: req.Domain,
 				Server: a.Data,
@@ -220,44 +218,44 @@ func (dt *dNSTask) subdomainQueries(ctx context.Context, req *requests.DNSReques
 				Source: "DNS",
 			}, tp)
 
-			req.Records = append(req.Records, convertAnswers([]*resolvers.ExtractedAnswer{a})...)
+			req.Records = append(req.Records, convertAnswers([]*resolve.ExtractedAnswer{a})...)
 		}
 	} else {
 		dt.handleResolverError(ctx, err)
 	}
 
-	msg = resolvers.QueryMsg(req.Name, dns.TypeMX)
+	msg = resolve.QueryMsg(req.Name, dns.TypeMX)
 	// Obtain the DNS answers for the MX records related to the domain
-	if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityHigh, resolvers.PoolRetryPolicy); err == nil {
-		ans := resolvers.ExtractAnswers(resp)
-		rr := resolvers.AnswersByType(ans, dns.TypeMX)
+	if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityHigh, resolve.PoolRetryPolicy); err == nil {
+		ans := resolve.ExtractAnswers(resp)
+		rr := resolve.AnswersByType(ans, dns.TypeMX)
 
 		req.Records = append(req.Records, convertAnswers(rr)...)
 	} else {
 		dt.handleResolverError(ctx, err)
 	}
 
-	msg = resolvers.QueryMsg(req.Name, dns.TypeSOA)
+	msg = resolve.QueryMsg(req.Name, dns.TypeSOA)
 	// Obtain the DNS answers for the SOA records related to the domain
-	if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityHigh, resolvers.PoolRetryPolicy); err == nil {
-		ans := resolvers.ExtractAnswers(resp)
-		rr := resolvers.AnswersByType(ans, dns.TypeSOA)
+	if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityHigh, resolve.PoolRetryPolicy); err == nil {
+		ans := resolve.ExtractAnswers(resp)
+		rr := resolve.AnswersByType(ans, dns.TypeSOA)
 
 		for _, a := range rr {
 			pieces := strings.Split(a.Data, ",")
 			a.Data = pieces[len(pieces)-1]
 
-			req.Records = append(req.Records, convertAnswers([]*resolvers.ExtractedAnswer{a})...)
+			req.Records = append(req.Records, convertAnswers([]*resolve.ExtractedAnswer{a})...)
 		}
 	} else {
 		dt.handleResolverError(ctx, err)
 	}
 
-	msg = resolvers.QueryMsg(req.Name, dns.TypeSPF)
+	msg = resolve.QueryMsg(req.Name, dns.TypeSPF)
 	// Obtain the DNS answers for the SPF records related to the domain
-	if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityHigh, resolvers.PoolRetryPolicy); err == nil {
-		ans := resolvers.ExtractAnswers(resp)
-		rr := resolvers.AnswersByType(ans, dns.TypeSPF)
+	if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityHigh, resolve.PoolRetryPolicy); err == nil {
+		ans := resolve.ExtractAnswers(resp)
+		rr := resolve.AnswersByType(ans, dns.TypeSPF)
 
 		req.Records = append(req.Records, convertAnswers(rr)...)
 	} else {
@@ -265,23 +263,28 @@ func (dt *dNSTask) subdomainQueries(ctx context.Context, req *requests.DNSReques
 	}
 
 	if req.Valid() && len(req.Records) > 0 {
-		go pipeline.SendData(ctx, "store", req, tp)
+		pipeline.SendData(ctx, "store", req, tp)
 	}
 }
 
 func (dt *dNSTask) queryServiceNames(ctx context.Context, req *requests.DNSRequest, tp pipeline.TaskParams) {
 	for _, name := range popularSRVRecords {
-		srvName := name + "." + req.Name
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 
-		msg := resolvers.QueryMsg(srvName, dns.TypeSRV)
-		if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityLow,
-			resolvers.PoolRetryPolicy); err == nil && len(resp.Answer) > 0 {
-			ans := resolvers.ExtractAnswers(resp)
+		srvName := name + "." + req.Name
+		msg := resolve.QueryMsg(srvName, dns.TypeSRV)
+		if resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityLow,
+			resolve.PoolRetryPolicy); err == nil && len(resp.Answer) > 0 {
+			ans := resolve.ExtractAnswers(resp)
 			if len(ans) == 0 {
 				continue
 			}
 
-			rr := resolvers.AnswersByType(ans, dns.TypeSRV)
+			rr := resolve.AnswersByType(ans, dns.TypeSRV)
 			if len(rr) == 0 {
 				continue
 			}
@@ -297,8 +300,8 @@ func (dt *dNSTask) queryServiceNames(ctx context.Context, req *requests.DNSReque
 				continue
 			}
 
-			if dt.enum.Sys.Pool().WildcardType(ctx, resp, req.Domain) == resolvers.WildcardTypeNone {
-				go pipeline.SendData(ctx, "filter", req, tp)
+			if dt.enum.Sys.Pool().WildcardType(ctx, resp, req.Domain) == resolve.WildcardTypeNone {
+				pipeline.SendData(ctx, "filter", req, tp)
 			}
 		} else {
 			dt.handleResolverError(ctx, err)
@@ -307,51 +310,66 @@ func (dt *dNSTask) queryServiceNames(ctx context.Context, req *requests.DNSReque
 }
 
 func (dt *dNSTask) reverseDNSQuery(ctx context.Context, addr string, tp pipeline.TaskParams) bool {
-	msg := resolvers.ReverseMsg(addr)
+	select {
+	case <-ctx.Done():
+		return false
+	default:
+	}
+
+	msg := resolve.ReverseMsg(addr)
 	if msg == nil {
 		return false
 	}
 
 	var nxdomain bool
-	resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityLow, func(times, priority int, m *dns.Msg) bool {
+	resp, err := dt.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityLow, func(times, priority int, m *dns.Msg) bool {
 		// Try one more time if we receive NXDOMAIN
 		if m.Rcode == dns.RcodeNameError && !nxdomain {
 			nxdomain = true
 			return true
 		}
-		return resolvers.PoolRetryPolicy(times, priority, m)
+		return resolve.PoolRetryPolicy(times, priority, m)
 	})
 	if err != nil {
 		return false
 	}
 
-	ans := resolvers.ExtractAnswers(resp)
+	ans := resolve.ExtractAnswers(resp)
 	if len(ans) == 0 {
 		return false
 	}
 
-	rr := resolvers.AnswersByType(ans, dns.TypePTR)
+	rr := resolve.AnswersByType(ans, dns.TypePTR)
 	if len(rr) == 0 {
 		return false
 	}
 
-	answer := strings.ToLower(resolvers.RemoveLastDot(rr[0].Data))
+	answer := strings.ToLower(resolve.RemoveLastDot(rr[0].Data))
 	if _, ok := dns.IsDomainName(answer); !ok {
 		return false
 	}
 
-	// Check that the name discovered is in scope
-	if dt.enum.Config.WhichDomain(answer) == "" {
+	if amassdns.RemoveAsteriskLabel(answer) != answer {
 		return false
 	}
 
-	ptr := resolvers.RemoveLastDot(rr[0].Name)
+	// Check that the name discovered is in scope
+	d := dt.enum.Config.WhichDomain(answer)
+	if d == "" {
+		return false
+	}
+
+	if re := dt.enum.Config.DomainRegex(d); re == nil || re.FindString(answer) != answer {
+		return false
+	}
+
+	ptr := resolve.RemoveLastDot(rr[0].Name)
 	domain, err := publicsuffix.EffectiveTLDPlusOne(ptr)
 	if err != nil {
 		return true
 	}
 
-	go pipeline.SendData(ctx, "filter", &requests.DNSRequest{
+	pipeline.SendData(ctx, "filter", &requests.DNSRequest{
 		Name:   ptr,
 		Domain: domain,
 		Records: []requests.DNSAnswer{{
@@ -366,7 +384,7 @@ func (dt *dNSTask) reverseDNSQuery(ctx context.Context, addr string, tp pipeline
 	return true
 }
 
-func convertAnswers(ans []*resolvers.ExtractedAnswer) []requests.DNSAnswer {
+func convertAnswers(ans []*resolve.ExtractedAnswer) []requests.DNSAnswer {
 	var answers []requests.DNSAnswer
 
 	for _, a := range ans {

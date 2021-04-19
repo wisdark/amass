@@ -1,4 +1,4 @@
-// Copyright 2017-2020 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package config
@@ -18,7 +18,7 @@ import (
 )
 
 // DefaultQueriesPerPublicResolver is the number of queries sent to each public DNS resolver per second.
-const DefaultQueriesPerPublicResolver = 15
+const DefaultQueriesPerPublicResolver = 50
 
 // DefaultQueriesPerBaselineResolver is the number of queries sent to each trusted DNS resolver per second.
 const DefaultQueriesPerBaselineResolver = 50

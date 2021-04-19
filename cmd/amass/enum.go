@@ -27,9 +27,9 @@ import (
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/datasrcs"
 	"github.com/OWASP/Amass/v3/enum"
+	"github.com/OWASP/Amass/v3/filter"
 	"github.com/OWASP/Amass/v3/format"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/stringfilter"
 	"github.com/OWASP/Amass/v3/systems"
 	"github.com/caffix/stringset"
 	"github.com/fatih/color"
@@ -178,7 +178,9 @@ func runEnumCommand(clArgs []string) {
 	}
 	defer func() { _ = sys.Shutdown() }()
 	sys.SetDataSources(datasrcs.GetAllSources(sys))
+
 	// Expand data source category names into the associated source names
+	initializeSourceTags(sys.DataSources())
 	cfg.SourceFilter.Sources = expandCategoryNames(cfg.SourceFilter.Sources, generateCategoryMap(sys))
 
 	// Setup the new enumeration
@@ -212,9 +214,6 @@ func runEnumCommand(clArgs []string) {
 	go saveJSONOutput(e, args, jsonOutChan, &wg)
 	outChans = append(outChans, jsonOutChan)
 
-	wg.Add(1)
-	go processOutput(e, outChans, done, &wg)
-
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if args.Timeout == 0 {
@@ -223,6 +222,9 @@ func runEnumCommand(clArgs []string) {
 		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(args.Timeout)*time.Minute)
 	}
 	defer cancel()
+
+	wg.Add(1)
+	go processOutput(ctx, e, outChans, done, &wg)
 
 	// Monitor for cancellation by the user
 	go func() {
@@ -242,7 +244,7 @@ func runEnumCommand(clArgs []string) {
 		r.Println(err)
 		os.Exit(1)
 	}
-	// Let all the goroutines know that the enumeration has finished
+	// Let all the output goroutines know that the enumeration has finished
 	close(done)
 	wg.Wait()
 
@@ -490,14 +492,20 @@ func saveJSONOutput(e *enum.Enumeration, args *enumArgs, output chan *requests.O
 	}
 }
 
-func processOutput(e *enum.Enumeration, outputs []chan *requests.Output, done chan struct{}, wg *sync.WaitGroup) {
+func processOutput(ctx context.Context, e *enum.Enumeration, outputs []chan *requests.Output, done chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer func() {
+		// Signal all the other output goroutines to terminate
+		for _, ch := range outputs {
+			close(ch)
+		}
+	}()
 
 	// This filter ensures that we only get new names
-	known := stringfilter.NewBloomFilter(1 << 22)
+	known := filter.NewBloomFilter(1 << 22)
 	// The function that obtains output from the enum and puts it on the channel
 	extract := func() {
-		for _, o := range e.ExtractOutput(known, true) {
+		for _, o := range ExtractOutput(e, known, true) {
 			if !e.Config.IsDomainInScope(o.Name) {
 				continue
 			}
@@ -508,30 +516,19 @@ func processOutput(e *enum.Enumeration, outputs []chan *requests.Output, done ch
 		}
 	}
 
-	t := time.NewTimer(15 * time.Second)
-loop:
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-done:
-			break loop
-		case <-t.C:
-			started := time.Now()
+			// Check one last time
 			extract()
-			next := time.Since(started) * 5
-			if next < 3*time.Second {
-				next = 3 * time.Second
-			} else if next > 10*time.Second {
-				next = 10 * time.Second
-			}
-			t.Reset(next)
+			return
+		case <-t.C:
+			extract()
 		}
-	}
-
-	// Check one last time
-	extract()
-	// Signal all the other goroutines to terminate
-	for _, ch := range outputs {
-		close(ch)
 	}
 }
 

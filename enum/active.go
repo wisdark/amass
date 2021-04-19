@@ -14,7 +14,7 @@ import (
 	"github.com/caffix/eventbus"
 	"github.com/caffix/pipeline"
 	"github.com/caffix/queue"
-	"github.com/caffix/resolvers"
+	"github.com/caffix/resolve"
 	"github.com/miekg/dns"
 )
 
@@ -50,6 +50,10 @@ func newActiveTask(e *Enumeration, max int) *activeTask {
 
 	go a.processQueue()
 	return a
+}
+
+func (a *activeTask) Stop() {
+	a.queue.Process(func(e interface{}) {})
 }
 
 // Process implements the pipeline Task interface.
@@ -94,6 +98,8 @@ func (a *activeTask) processQueue() {
 
 func (a *activeTask) processTask() {
 	select {
+	case <-a.enum.ctx.Done():
+		return
 	case <-a.enum.done:
 		return
 	case <-a.tokenPool:
@@ -125,13 +131,15 @@ func (a *activeTask) crawlName(ctx context.Context, req *requests.DNSRequest, tp
 		return
 	}
 
-	// Hold the pipeline during slow activities
-	tp.NewData() <- req
-	defer func() { tp.ProcessedData() <- req }()
-
 	cfg := a.enum.Config
 	var protocol string
 	for _, port := range cfg.Ports {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		if strings.HasSuffix(strconv.Itoa(port), "80") {
 			protocol = "http://"
 		} else {
@@ -149,7 +157,7 @@ func (a *activeTask) crawlName(ctx context.Context, req *requests.DNSRequest, tp
 		for _, name := range names {
 			if n := strings.TrimSpace(name); n != "" {
 				if domain := cfg.WhichDomain(n); domain != "" {
-					go pipeline.SendData(ctx, "new", &requests.DNSRequest{
+					pipeline.SendData(ctx, "new", &requests.DNSRequest{
 						Name:   n,
 						Domain: domain,
 						Tag:    requests.CRAWL,
@@ -168,14 +176,16 @@ func (a *activeTask) certEnumeration(ctx context.Context, req *requests.AddrRequ
 		return
 	}
 
-	// Hold the pipeline during slow activities
-	tp.NewData() <- req
-	defer func() { tp.ProcessedData() <- req }()
-
 	for _, name := range http.PullCertificateNames(ctx, req.Address, a.enum.Config.Ports) {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		if n := strings.TrimSpace(name); n != "" {
 			if domain := a.enum.Config.WhichDomain(n); domain != "" {
-				go pipeline.SendData(ctx, "new", &requests.DNSRequest{
+				pipeline.SendData(ctx, "new", &requests.DNSRequest{
 					Name:   n,
 					Domain: domain,
 					Tag:    requests.CERT,
@@ -187,14 +197,16 @@ func (a *activeTask) certEnumeration(ctx context.Context, req *requests.AddrRequ
 }
 
 func (a *activeTask) zoneTransfer(ctx context.Context, req *requests.ZoneXFRRequest, tp pipeline.TaskParams) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
 	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
-
-	// Hold the pipeline during slow activities
-	tp.NewData() <- req
-	defer func() { tp.ProcessedData() <- req }()
 
 	addr, err := a.nameserverAddr(ctx, req.Server)
 	if addr == "" {
@@ -210,7 +222,7 @@ func (a *activeTask) zoneTransfer(ctx context.Context, req *requests.ZoneXFRRequ
 	}
 
 	for _, req := range reqs {
-		go pipeline.SendData(ctx, "filter", req, tp)
+		pipeline.SendData(ctx, "filter", req, tp)
 	}
 }
 
@@ -222,23 +234,19 @@ func (a *activeTask) zoneWalk(ctx context.Context, req *requests.ZoneXFRRequest,
 		return
 	}
 
-	// Hold the pipeline during slow activities
-	tp.NewData() <- req
-	defer func() { tp.ProcessedData() <- req }()
-
 	addr, err := a.nameserverAddr(ctx, req.Server)
 	if addr == "" {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("DNS: Zone Walk failed: %v", err))
 		return
 	}
 
-	r := resolvers.NewBaseResolver(addr, 50, a.enum.Config.Log)
+	r := resolve.NewBaseResolver(addr, 50, a.enum.Config.Log)
 	if r == nil {
 		return
 	}
 	defer r.Stop()
 
-	names, _, err := resolvers.NsecTraversal(ctx, r, req.Name, resolvers.PriorityHigh)
+	names, _, err := resolve.NsecTraversal(ctx, r, req.Name, resolve.PriorityHigh)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 			fmt.Sprintf("DNS: Zone Walk failed: %s: %v", req.Name, err))
@@ -246,10 +254,10 @@ func (a *activeTask) zoneWalk(ctx context.Context, req *requests.ZoneXFRRequest,
 	}
 
 	for _, nsec := range names {
-		name := resolvers.RemoveLastDot(nsec.NextDomain)
+		name := resolve.RemoveLastDot(nsec.NextDomain)
 
 		if domain := cfg.WhichDomain(name); domain != "" {
-			go pipeline.SendData(ctx, "new", &requests.DNSRequest{
+			pipeline.SendData(ctx, "new", &requests.DNSRequest{
 				Name:   name,
 				Domain: domain,
 				Tag:    requests.DNS,
@@ -266,9 +274,9 @@ func (a *activeTask) nameserverAddr(ctx context.Context, server string) (string,
 	var resp *dns.Msg
 
 	for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		msg := resolvers.QueryMsg(server, t)
+		msg := resolve.QueryMsg(server, t)
 
-		resp, err = a.enum.Sys.Pool().Query(ctx, msg, resolvers.PriorityHigh, resolvers.RetryPolicy)
+		resp, err = a.enum.Sys.Pool().Query(ctx, msg, resolve.PriorityHigh, resolve.RetryPolicy)
 		if err == nil && resp != nil && len(resp.Answer) > 0 {
 			qtype = t
 			found = true
@@ -279,7 +287,7 @@ func (a *activeTask) nameserverAddr(ctx context.Context, server string) (string,
 		return "", fmt.Errorf("DNS server %s has no A or AAAA records", server)
 	}
 
-	rr := resolvers.AnswersByType(resolvers.ExtractAnswers(resp), qtype)
+	rr := resolve.AnswersByType(resolve.ExtractAnswers(resp), qtype)
 	if len(rr) == 0 {
 		return "", fmt.Errorf("DNS server %s has no A or AAAA records", server)
 	}

@@ -15,19 +15,19 @@ import (
 	"time"
 
 	"github.com/OWASP/Amass/v3/config"
-	"github.com/OWASP/Amass/v3/graph"
 	"github.com/OWASP/Amass/v3/limits"
 	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/caffix/resolvers"
+	"github.com/caffix/netmap"
+	"github.com/caffix/resolve"
 	"github.com/caffix/service"
 )
 
 // LocalSystem implements a System to be executed within a single process.
 type LocalSystem struct {
-	cfg               *config.Config
-	pool              resolvers.Resolver
-	graphs            []*graph.Graph
+	Cfg               *config.Config
+	pool              resolve.Resolver
+	graphs            []*netmap.Graph
 	cache             *requests.ASNCache
 	done              chan struct{}
 	doneAlreadyClosed bool
@@ -43,7 +43,7 @@ func NewLocalSystem(c *config.Config) (*LocalSystem, error) {
 
 	max := int(float64(limits.GetFileLimit()) * 0.7)
 
-	var pool resolvers.Resolver
+	var pool resolve.Resolver
 	if len(c.Resolvers) == 0 {
 		pool = publicResolverSetup(c, max)
 	} else {
@@ -54,7 +54,7 @@ func NewLocalSystem(c *config.Config) (*LocalSystem, error) {
 	}
 
 	sys := &LocalSystem{
-		cfg:        c,
+		Cfg:        c,
 		pool:       pool,
 		cache:      requests.NewASNCache(),
 		done:       make(chan struct{}, 2),
@@ -84,11 +84,11 @@ func NewLocalSystem(c *config.Config) (*LocalSystem, error) {
 
 // Config implements the System interface.
 func (l *LocalSystem) Config() *config.Config {
-	return l.cfg
+	return l.Cfg
 }
 
 // Pool implements the System interface.
-func (l *LocalSystem) Pool() resolvers.Resolver {
+func (l *LocalSystem) Pool() resolve.Resolver {
 	return l.pool
 }
 
@@ -144,7 +144,7 @@ loop:
 }
 
 // GraphDatabases implements the System interface.
-func (l *LocalSystem) GraphDatabases() []*graph.Graph {
+func (l *LocalSystem) GraphDatabases() []*netmap.Graph {
 	return l.graphs
 }
 
@@ -188,7 +188,7 @@ func (l *LocalSystem) GetAllSourceNames() []string {
 }
 
 func (l *LocalSystem) setupOutputDirectory() error {
-	path := config.OutputDirectory(l.cfg.Dir)
+	path := config.OutputDirectory(l.Cfg.Dir)
 	if path == "" {
 		return nil
 	}
@@ -213,18 +213,18 @@ func (l *LocalSystem) setupGraphDBs() error {
 	dbs = append(dbs, cfg.GraphDBs...)
 
 	for _, db := range dbs {
-		cayley := graph.NewCayleyGraph(db.System, db.URL, db.Options)
+		cayley := netmap.NewCayleyGraph(db.System, db.URL, db.Options)
 		if cayley == nil {
 			return fmt.Errorf("System: Failed to create the %s graph", db.System)
 		}
 
-		g := graph.NewGraph(cayley)
+		g := netmap.NewGraph(cayley)
 		if g == nil {
 			return fmt.Errorf("System: Failed to create the %s graph", g.String())
 		}
 
 		// Load the ASN Cache with all prior knowledge of IP address ranges and ASNs
-		_ = g.ASNCacheFill(l.Cache())
+		//_ = ASNCacheFill(g, l.Cache())
 
 		l.graphs = append(l.graphs, g)
 	}
@@ -285,7 +285,7 @@ func (l *LocalSystem) loadCacheData() error {
 	return nil
 }
 
-func customResolverSetup(cfg *config.Config, max int) resolvers.Resolver {
+func customResolverSetup(cfg *config.Config, max int) resolve.Resolver {
 	num := len(cfg.Resolvers)
 	if num > max {
 		num = max
@@ -298,17 +298,17 @@ func customResolverSetup(cfg *config.Config, max int) resolvers.Resolver {
 	}
 
 	rate := cfg.MaxDNSQueries / num
-	var trusted []resolvers.Resolver
+	var trusted []resolve.Resolver
 	for _, addr := range cfg.Resolvers {
-		if r := resolvers.NewBaseResolver(addr, rate, cfg.Log); r != nil {
+		if r := resolve.NewBaseResolver(addr, rate, cfg.Log); r != nil {
 			trusted = append(trusted, r)
 		}
 	}
 
-	return resolvers.NewResolverPool(trusted, 2*time.Second, nil, 1, cfg.Log)
+	return resolve.NewResolverPool(trusted, 2*time.Second, nil, 1, cfg.Log)
 }
 
-func publicResolverSetup(cfg *config.Config, max int) resolvers.Resolver {
+func publicResolverSetup(cfg *config.Config, max int) resolve.Resolver {
 	num := len(config.PublicResolvers)
 	if num > max {
 		num = max
@@ -320,33 +320,33 @@ func publicResolverSetup(cfg *config.Config, max int) resolvers.Resolver {
 		cfg.MaxDNSQueries = num
 	}
 
-	var trusted []resolvers.Resolver
+	var trusted []resolve.Resolver
 	for _, addr := range config.DefaultBaselineResolvers {
-		if r := resolvers.NewBaseResolver(addr, config.DefaultQueriesPerBaselineResolver, cfg.Log); r != nil {
+		if r := resolve.NewBaseResolver(addr, config.DefaultQueriesPerBaselineResolver, cfg.Log); r != nil {
 			trusted = append(trusted, r)
 		}
 	}
 
-	baseline := resolvers.NewResolverPool(trusted, time.Second, nil, 1, cfg.Log)
+	baseline := resolve.NewResolverPool(trusted, time.Second, nil, 1, cfg.Log)
 	r := setupResolvers(config.PublicResolvers, max, config.DefaultQueriesPerPublicResolver, cfg.Log)
 
-	return resolvers.NewResolverPool(r, 2*time.Second, baseline, 2, cfg.Log)
+	return resolve.NewResolverPool(r, 2*time.Second, baseline, 2, cfg.Log)
 }
 
-func setupResolvers(addrs []string, max, rate int, log *log.Logger) []resolvers.Resolver {
+func setupResolvers(addrs []string, max, rate int, log *log.Logger) []resolve.Resolver {
 	if len(addrs) <= 0 {
 		return nil
 	}
 
-	finished := make(chan resolvers.Resolver, 10)
+	finished := make(chan resolve.Resolver, 10)
 	for _, addr := range addrs {
 		if _, _, err := net.SplitHostPort(addr); err != nil {
 			// Add the default port number to the IP address
 			addr = net.JoinHostPort(addr, "53")
 		}
-		go func(ip string, ch chan resolvers.Resolver) {
-			if err := resolvers.ClientSubnetCheck(ip); err == nil {
-				if n := resolvers.NewBaseResolver(ip, rate, log); n != nil {
+		go func(ip string, ch chan resolve.Resolver) {
+			if err := resolve.ClientSubnetCheck(ip); err == nil {
+				if n := resolve.NewBaseResolver(ip, rate, log); n != nil {
 					ch <- n
 				}
 			}
@@ -356,7 +356,7 @@ func setupResolvers(addrs []string, max, rate int, log *log.Logger) []resolvers.
 
 	l := len(addrs)
 	var count int
-	var resolvers []resolvers.Resolver
+	var resolvers []resolve.Resolver
 	for i := 0; i < l; i++ {
 		if r := <-finished; r != nil {
 			if count < max {

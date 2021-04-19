@@ -23,7 +23,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,13 +35,12 @@ import (
 
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/datasrcs"
+	"github.com/OWASP/Amass/v3/filter"
 	"github.com/OWASP/Amass/v3/format"
-	"github.com/OWASP/Amass/v3/graph"
 	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/stringfilter"
 	"github.com/OWASP/Amass/v3/systems"
-	"github.com/caffix/eventbus"
+	"github.com/caffix/netmap"
 	"github.com/caffix/service"
 	"github.com/fatih/color"
 )
@@ -223,18 +221,18 @@ func expandCategoryNames(names []string, categories map[string][]string) []strin
 	return newnames
 }
 
-func openGraphDatabase(dir string, cfg *config.Config) *graph.Graph {
+func openGraphDatabase(dir string, cfg *config.Config) *netmap.Graph {
 	for _, db := range cfg.GraphDBs {
 		if !db.Primary {
 			continue
 		}
 
-		cayley := graph.NewCayleyGraph(db.System, db.URL, db.Options)
+		cayley := netmap.NewCayleyGraph(db.System, db.URL, db.Options)
 		if cayley == nil {
 			return nil
 		}
 
-		g := graph.NewGraph(cayley)
+		g := netmap.NewGraph(cayley)
 		if g == nil {
 			return nil
 		}
@@ -245,12 +243,12 @@ func openGraphDatabase(dir string, cfg *config.Config) *graph.Graph {
 	if db := cfg.LocalDatabaseSettings(cfg.GraphDBs); db != nil {
 		db.Options = ""
 
-		cayley := graph.NewCayleyGraph(db.System, config.OutputDirectory(dir), db.Options)
+		cayley := netmap.NewCayleyGraph(db.System, config.OutputDirectory(dir), db.Options)
 		if cayley == nil {
 			return nil
 		}
 
-		if g := graph.NewGraph(cayley); g != nil {
+		if g := netmap.NewGraph(cayley); g != nil {
 			return g
 		}
 	}
@@ -258,7 +256,7 @@ func openGraphDatabase(dir string, cfg *config.Config) *graph.Graph {
 	return nil
 }
 
-func orderedEvents(events []string, db *graph.Graph) ([]string, []time.Time, []time.Time) {
+func orderedEvents(events []string, db *netmap.Graph) ([]string, []time.Time, []time.Time) {
 	sort.Slice(events, func(i, j int) bool {
 		var less bool
 
@@ -283,7 +281,7 @@ func orderedEvents(events []string, db *graph.Graph) ([]string, []time.Time, []t
 }
 
 // Obtain the enumeration IDs that include the provided domain
-func eventUUIDs(domains []string, db *graph.Graph) []string {
+func eventUUIDs(domains []string, db *netmap.Graph) []string {
 	var uuids []string
 
 	for _, id := range db.EventList() {
@@ -309,8 +307,8 @@ func eventUUIDs(domains []string, db *graph.Graph) []string {
 	return uuids
 }
 
-func memGraphForScope(domains []string, from *graph.Graph) (*graph.Graph, error) {
-	db := graph.NewGraph(graph.NewCayleyGraphMemory())
+func memGraphForScope(domains []string, from *netmap.Graph) (*netmap.Graph, error) {
+	db := netmap.NewGraph(netmap.NewCayleyGraphMemory())
 	if db == nil {
 		return nil, errors.New("Failed to create the in-memory graph database")
 	}
@@ -329,12 +327,12 @@ func memGraphForScope(domains []string, from *graph.Graph) (*graph.Graph, error)
 	return db, nil
 }
 
-func getEventOutput(uuids []string, asninfo bool, db *graph.Graph, cache *requests.ASNCache) []*requests.Output {
+func getEventOutput(uuids []string, asninfo bool, db *netmap.Graph, cache *requests.ASNCache) []*requests.Output {
 	var output []*requests.Output
-	filter := stringfilter.NewStringFilter()
+	filter := filter.NewStringFilter()
 
 	for i := len(uuids) - 1; i >= 0; i-- {
-		output = append(output, db.EventOutput(uuids[i], filter, asninfo, cache)...)
+		output = append(output, EventOutput(db, uuids[i], filter, asninfo, cache)...)
 	}
 
 	return output
@@ -354,60 +352,6 @@ func domainNameInScope(name string, scope []string) bool {
 	}
 
 	return discovered
-}
-
-func healASInfo(uuids []string, db *graph.Graph) bool {
-	cfg := config.NewConfig()
-	cfg.LocalDatabase = false
-
-	sys, err := systems.NewLocalSystem(cfg)
-	if err != nil {
-		return false
-	}
-	sys.SetDataSources(datasrcs.GetAllSources(sys))
-	defer func() { _ = sys.Shutdown() }()
-
-	cache := sys.Cache()
-	for _, g := range sys.GraphDatabases() {
-		_ = g.ASNCacheFill(cache)
-	}
-
-	bus := eventbus.NewEventBus()
-	bus.Subscribe(requests.NewASNTopic, cache.Update)
-	defer bus.Unsubscribe(requests.NewASNTopic, cache.Update)
-	ctx := context.WithValue(context.Background(), requests.ContextConfig, cfg)
-	ctx = context.WithValue(ctx, requests.ContextEventBus, bus)
-
-	var updated bool
-	for _, uuid := range uuids {
-		for _, out := range db.EventOutput(uuid, nil, false, cache) {
-			for _, a := range out.Addresses {
-				if r := cache.AddrSearch(a.Address.String()); r != nil {
-					_ = db.InsertInfrastructure(r.ASN, r.Description, r.Address, r.Prefix, r.Source, r.Tag, uuid)
-					continue
-				}
-
-				for _, src := range sys.DataSources() {
-					src.Request(ctx, &requests.ASNRequest{Address: a.Address.String()})
-				}
-
-				for i := 0; i < 30; i++ {
-					if cache.AddrSearch(a.Address.String()) != nil {
-						break
-					}
-					time.Sleep(time.Second)
-				}
-
-				if r := cache.AddrSearch(a.Address.String()); r != nil {
-					_ = db.InsertInfrastructure(r.ASN, r.Description, r.Address, r.Prefix, r.Source, r.Tag, uuid)
-				}
-
-				updated = true
-			}
-		}
-	}
-
-	return updated
 }
 
 func assignNetInterface(iface *net.Interface) error {

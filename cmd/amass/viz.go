@@ -158,15 +158,8 @@ func runVizCommand(clArgs []string) {
 		uuids = []string{uuids[args.Enum]}
 	}
 
-	// Need to check if all the network infrastructure information is available
-	fgY.Fprintln(color.Error, "Could take a moment while acquiring AS network information")
-	// Migrate the changes back to the persistent db
-	if healASInfo(uuids, memDB) {
-		_ = memDB.MigrateEvents(db, uuids...)
-	}
-
 	// Obtain the visualization nodes & edges from the graph
-	nodes, edges := memDB.VizData(uuids)
+	nodes, edges := viz.VizData(memDB, uuids)
 
 	// Get the directory to save the files into
 	dir := args.Filepaths.Directory

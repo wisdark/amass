@@ -9,14 +9,13 @@ import (
 
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/datasrcs"
-	"github.com/OWASP/Amass/v3/graph"
+	"github.com/OWASP/Amass/v3/filter"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/stringfilter"
 	"github.com/OWASP/Amass/v3/systems"
 	"github.com/caffix/eventbus"
+	"github.com/caffix/netmap"
 	"github.com/caffix/pipeline"
 	"github.com/caffix/queue"
-	"github.com/caffix/resolvers"
 	"github.com/caffix/service"
 )
 
@@ -27,15 +26,15 @@ type Enumeration struct {
 	Config         *config.Config
 	Bus            *eventbus.EventBus
 	Sys            systems.System
-	Graph          *graph.Graph
+	Graph          *netmap.Graph
 	closedOnce     sync.Once
 	logQueue       queue.Queue
 	ctx            context.Context
 	srcs           []service.Service
 	done           chan struct{}
 	doneOnce       sync.Once
-	resolvedFilter stringfilter.Filter
-	crawlFilter    stringfilter.Filter
+	resolvedFilter filter.Filter
+	crawlFilter    filter.Filter
 	nameSrc        *enumSource
 	subTask        *subdomainTask
 	dnsTask        *dNSTask
@@ -47,12 +46,12 @@ func NewEnumeration(cfg *config.Config, sys systems.System) *Enumeration {
 		Config:         cfg,
 		Sys:            sys,
 		Bus:            eventbus.NewEventBus(),
-		Graph:          graph.NewGraph(graph.NewCayleyGraphMemory()),
+		Graph:          netmap.NewGraph(netmap.NewCayleyGraphMemory()),
 		srcs:           datasrcs.SelectedDataSources(cfg, sys.DataSources()),
 		logQueue:       queue.NewQueue(),
 		done:           make(chan struct{}),
-		resolvedFilter: stringfilter.NewBloomFilter(filterMaxSize),
-		crawlFilter:    stringfilter.NewStringFilter(),
+		resolvedFilter: filter.NewBloomFilter(filterMaxSize),
+		crawlFilter:    filter.NewStringFilter(),
 	}
 
 	if cfg.Passive {
@@ -84,16 +83,14 @@ func (e *Enumeration) Start(ctx context.Context) error {
 		return err
 	}
 
-	max := e.Config.MaxDNSQueries * int(resolvers.QueryTimeout.Seconds())
+	max := e.Config.MaxDNSQueries
 	// The pipeline input source will receive all the names
 	e.nameSrc = newEnumSource(e, max)
 	e.startupAndCleanup(ctx)
+	defer e.stop()
 
 	var stages []pipeline.Stage
 	if !e.Config.Passive {
-		// Task that performs initial filtering for new FQDNs and IP addresses
-		stages = append(stages, pipeline.FixedPool("new",
-			e.makeNewDataTaskFunc(newFQDNFilter(e), newAddressTask(e)), 50))
 		stages = append(stages, pipeline.FixedPool("", e.dnsTask.makeBlacklistTaskFunc(), 50))
 		// Task that performs DNS queries for root domain names
 		stages = append(stages, pipeline.DynamicPool("root", e.dnsTask.makeRootTaskFunc(), max))
@@ -104,11 +101,13 @@ func (e *Enumeration) Start(ctx context.Context) error {
 	stages = append(stages, pipeline.FIFO("filter", e.makeFilterTaskFunc()))
 
 	if !e.Config.Passive {
-		stages = append(stages, pipeline.FIFO("store", newDataManager(e)))
+		stages = append(stages, pipeline.DynamicPool("store", newDataManager(e), 50))
 		stages = append(stages, pipeline.FIFO("", e.subTask))
 	}
 	if e.Config.Active {
-		stages = append(stages, pipeline.FIFO("active", newActiveTask(e, 50)))
+		activetask := newActiveTask(e, 25)
+		defer activetask.Stop()
+		stages = append(stages, pipeline.FIFO("active", activetask))
 	}
 
 	/*
@@ -116,7 +115,7 @@ func (e *Enumeration) Start(ctx context.Context) error {
 	 * by the user and names acquired from the graph database can be brought
 	 * into the enumeration
 	 */
-	e.submitKnownNames()
+	go e.submitKnownNames()
 	e.submitProvidedNames()
 	e.submitDomainNames()
 	e.submitASNs()
@@ -129,10 +128,10 @@ func (e *Enumeration) startupAndCleanup(ctx context.Context) {
 	 * These events are important to the engine in order to receive data,
 	 * logs, and notices about discoveries made during the enumeration
 	 */
-	e.Bus.Subscribe(requests.NewNameTopic, e.nameSrc.InputName)
+	e.Bus.Subscribe(requests.NewNameTopic, e.nameSrc.dataSourceName)
 	e.Bus.Subscribe(requests.LogTopic, e.queueLog)
 	if !e.Config.Passive {
-		e.Bus.Subscribe(requests.NewAddrTopic, e.nameSrc.InputAddress)
+		e.Bus.Subscribe(requests.NewAddrTopic, e.nameSrc.dataSourceAddr)
 		e.Bus.Subscribe(requests.NewASNTopic, e.Sys.Cache().Update)
 	}
 
@@ -141,32 +140,24 @@ func (e *Enumeration) startupAndCleanup(ctx context.Context) {
 
 	go func() {
 		<-e.done
-		defer e.Bus.Unsubscribe(requests.NewNameTopic, e.nameSrc.InputName)
-		defer e.Bus.Unsubscribe(requests.LogTopic, e.queueLog)
+		e.Bus.Unsubscribe(requests.NewNameTopic, e.nameSrc.dataSourceName)
+		e.Bus.Unsubscribe(requests.LogTopic, e.queueLog)
 
 		if !e.Config.Passive {
-			defer e.Bus.Unsubscribe(requests.NewAddrTopic, e.nameSrc.InputAddress)
-			defer e.Bus.Unsubscribe(requests.NewASNTopic, e.Sys.Cache().Update)
-			// Attempt to fix IP address nodes without edges to netblocks
-			defer func() { _ = e.Graph.HealAddressNodes(e.Sys.Cache(), e.Config.UUID.String()) }()
+			e.Bus.Unsubscribe(requests.NewAddrTopic, e.nameSrc.dataSourceAddr)
+			e.Bus.Unsubscribe(requests.NewASNTopic, e.Sys.Cache().Update)
+			e.nameSrc.Stop()
+			e.subTask.Stop()
 		}
 
-		defer e.stop()
-		defer e.writeLogs(true)
+		e.writeLogs(true)
 	}()
 }
 
 // This context, used throughout the enumeration, will provide the ability to cancel operations
-// and to pass the configuration and event bus to all the components. If a timeout was provided
-// in the configuration, it will go off that many minutes from this point in the enumeration
-// process and terminate the pipeline.
-func (e *Enumeration) setupContext(ctx context.Context) context.Context {
-	var cancel context.CancelFunc
-
-	ctx, cancel = context.WithCancel(ctx)
-	ctx = context.WithValue(ctx, requests.ContextConfig, e.Config)
-	ctx = context.WithValue(ctx, requests.ContextEventBus, e.Bus)
-	e.ctx = ctx
+// and to pass the configuration and event bus to all the components.
+func (e *Enumeration) setupContext(ctx context.Context) {
+	newctx, cancel := context.WithCancel(ctx)
 
 	// Monitor for termination of the enumeration
 	go func() {
@@ -174,7 +165,9 @@ func (e *Enumeration) setupContext(ctx context.Context) context.Context {
 		cancel()
 	}()
 
-	return ctx
+	newctx = context.WithValue(newctx, requests.ContextConfig, e.Config)
+	newctx = context.WithValue(newctx, requests.ContextEventBus, e.Bus)
+	e.ctx = newctx
 }
 
 // Release the root domain names to the input source and each data source.
@@ -187,7 +180,7 @@ func (e *Enumeration) submitDomainNames() {
 			Source: "DNS",
 		}
 
-		e.nameSrc.InputName(req)
+		e.nameSrc.dataSourceName(req)
 		for _, src := range e.srcs {
 			src.Request(e.ctx, req.Clone().(*requests.DNSRequest))
 		}
@@ -218,35 +211,11 @@ func (e *Enumeration) makeOutputSink() pipeline.SinkFunc {
 		}
 
 		if e.Config.IsDomainInScope(req.Name) {
-			if _, err := e.Graph.InsertFQDN(req.Name, req.Source, req.Tag, e.Config.UUID.String()); err != nil {
+			if _, err := e.Graph.UpsertFQDN(req.Name, req.Source, e.Config.UUID.String()); err != nil {
 				e.Bus.Publish(requests.LogTopic, eventbus.PriorityHigh, err.Error())
 			}
 		}
 		return nil
-	})
-}
-
-func (e *Enumeration) makeNewDataTaskFunc(fqdn *fqdnFilter, addrs *addrTask) pipeline.TaskFunc {
-	return pipeline.TaskFunc(func(ctx context.Context, data pipeline.Data, tp pipeline.TaskParams) (pipeline.Data, error) {
-		select {
-		case <-ctx.Done():
-			return nil, nil
-		default:
-		}
-
-		switch v := data.(type) {
-		case *requests.DNSRequest:
-			if v != nil && v.Valid() {
-				return fqdn.Process(ctx, data, tp)
-			}
-			return nil, nil
-		case *requests.AddrRequest:
-			if v != nil && v.Valid() {
-				return addrs.Process(ctx, data, tp)
-			}
-			return nil, nil
-		}
-		return data, nil
 	})
 }
 

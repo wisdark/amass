@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/OWASP/Amass/v3/config"
-	"github.com/OWASP/Amass/v3/graph"
 	"github.com/OWASP/Amass/v3/requests"
 	eb "github.com/caffix/eventbus"
-	"github.com/caffix/resolvers"
+	"github.com/caffix/netmap"
+	"github.com/caffix/resolve"
 	"github.com/caffix/service"
 )
 
@@ -21,7 +21,7 @@ type System interface {
 	Config() *config.Config
 
 	// Returns the resolver pool that handles DNS requests
-	Pool() resolvers.Resolver
+	Pool() resolve.Resolver
 
 	// Returns the cache populated by the system
 	Cache() *requests.ASNCache
@@ -39,7 +39,7 @@ type System interface {
 	SetDataSources(sources []service.Service)
 
 	// GraphDatabases return the Graphs used by the System
-	GraphDatabases() []*graph.Graph
+	GraphDatabases() []*netmap.Graph
 
 	// GetMemoryUsage() returns the number bytes allocated to heap objects on this system
 	GetMemoryUsage() uint64
