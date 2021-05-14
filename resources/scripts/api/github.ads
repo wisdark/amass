@@ -1,4 +1,4 @@
--- Copyright 2017 Jeff Foley. All rights reserved.
+-- Copyright 2017-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 local json = require("json")
@@ -35,30 +35,16 @@ function vertical(ctx, domain)
     end
 
     for i=1,100 do
-        local resp
         local vurl = buildurl(domain, i)
-        -- Check if the response data is in the graph database
-        if (cfg.ttl ~= nil and cfg.ttl > 0) then
-            resp = obtain_response(vurl, cfg.ttl)
-        end
-
-        if (resp == nil or resp == "") then
-            local err
-
-            resp, err = request({
-                url=vurl,
-                headers={
-                    ['Authorization']="token " .. c.key,
-                    ['Content-Type']="application/json",
-                },
-            })
-            if (err ~= nil and err ~= "") then
-                return
-            end
-
-            if (cfg.ttl ~= nil and cfg.ttl > 0) then
-                cache_response(vurl, resp)
-            end
+        local resp, err = request(ctx, {
+            url=vurl,
+            headers={
+                ['Authorization']="token " .. c.key,
+                ['Content-Type']="application/json",
+            },
+        })
+        if (err ~= nil and err ~= "") then
+            return
         end
 
         local d = json.decode(resp)
@@ -69,14 +55,11 @@ function vertical(ctx, domain)
         for i, item in pairs(d.items) do
             search_item(ctx, item)
         end
-
-        active(ctx)
-        checkratelimit()
     end
 end
 
 function search_item(ctx, item)
-    local info, err = request({
+    local info, err = request(ctx, {
         url=item.url,
         headers={['Content-Type']="application/json"},
     })
@@ -89,7 +72,7 @@ function search_item(ctx, item)
         return
     end
 
-    local content, err = request({url=data['download_url']})
+    local content, err = request(ctx, {url=data['download_url']})
     if err == nil then
         sendnames(ctx, content)
     end
@@ -105,7 +88,11 @@ function sendnames(ctx, content)
         return
     end
 
+    local found = {}
     for i, v in pairs(names) do
-        newname(ctx, v)
+        if found[v] == nil then
+            newname(ctx, v)
+            found[v] = true
+        end
     end
 end

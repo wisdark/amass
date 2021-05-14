@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package datasrcs
@@ -12,16 +12,16 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/OWASP/Amass/v3/config"
-	"github.com/OWASP/Amass/v3/eventbus"
 	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/net/dns"
 	"github.com/OWASP/Amass/v3/net/http"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/stringset"
 	"github.com/OWASP/Amass/v3/systems"
+	"github.com/caffix/eventbus"
+	"github.com/caffix/service"
+	"github.com/caffix/stringset"
 )
 
 const (
@@ -43,7 +43,7 @@ var (
 
 // NetworksDB is the Service that handles access to the NetworksDB.io data source.
 type NetworksDB struct {
-	requests.BaseService
+	service.BaseService
 
 	SourceType string
 	sys        systems.System
@@ -59,37 +59,53 @@ func NewNetworksDB(sys systems.System) *NetworksDB {
 		hasAPIKey:  true,
 	}
 
-	n.BaseService = *requests.NewBaseService(n, "NetworksDB")
+	n.BaseService = *service.NewBaseService(n, "NetworksDB")
 	return n
 }
 
-// Type implements the Service interface.
-func (n *NetworksDB) Type() string {
+// Description implements the Service interface.
+func (n *NetworksDB) Description() string {
 	return n.SourceType
 }
 
 // OnStart implements the Service interface.
 func (n *NetworksDB) OnStart() error {
-	n.BaseService.OnStart()
-
 	n.creds = n.sys.Config().GetDataSourceConfig(n.String()).GetCredentials()
+
 	if n.creds == nil || n.creds.Key == "" {
 		n.sys.Config().Log.Printf("%s: API key data was not provided", n.String())
 		n.SourceType = requests.SCRAPE
 		n.hasAPIKey = false
 	}
 
-	n.SetRateLimit(3 * time.Second)
+	n.SetRateLimit(1)
 	return nil
 }
 
-// OnASNRequest implements the Service interface.
-func (n *NetworksDB) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
+// OnRequest implements the Service interface.
+func (n *NetworksDB) OnRequest(ctx context.Context, args service.Args) {
+	check := true
+
+	switch req := args.(type) {
+	case *requests.ASNRequest:
+		n.asnRequest(ctx, req)
+	case *requests.WhoisRequest:
+		n.whoisRequest(ctx, req)
+	default:
+		check = false
+	}
+
+	if check {
+		n.CheckRateLimit()
+	}
+}
+
+func (n *NetworksDB) asnRequest(ctx context.Context, req *requests.ASNRequest) {
 	if req.Address == "" && req.ASN == 0 {
 		return
 	}
 
-	n.CheckRateLimit()
+	numRateLimitChecks(n, 2)
 	if n.hasAPIKey {
 		if req.Address != "" {
 			n.executeAPIASNAddrQuery(ctx, req.Address)
@@ -107,13 +123,13 @@ func (n *NetworksDB) OnASNRequest(ctx context.Context, req *requests.ASNRequest)
 }
 
 func (n *NetworksDB) executeASNAddrQuery(ctx context.Context, addr string) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
 
 	u := n.getIPURL(addr)
-	page, err := http.RequestWebPage(u, nil, nil, "", "")
+	page, err := http.RequestWebPage(ctx, u, nil, nil, nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 		return
@@ -127,11 +143,9 @@ func (n *NetworksDB) executeASNAddrQuery(ctx context.Context, addr string) {
 		return
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 3)
 	u = networksdbBaseURL + matches[1]
-	page, err = http.RequestWebPage(u, nil, nil, "", "")
+	page, err = http.RequestWebPage(ctx, u, nil, nil, nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 		return
@@ -168,16 +182,14 @@ func (n *NetworksDB) getIPURL(addr string) string {
 }
 
 func (n *NetworksDB) executeASNQuery(ctx context.Context, asn int, addr string, netblocks stringset.Set) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 3)
 	u := n.getASNURL(asn)
-	page, err := http.RequestWebPage(u, nil, nil, "", "")
+	page, err := http.RequestWebPage(ctx, u, nil, nil, nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 		return
@@ -239,7 +251,7 @@ func (n *NetworksDB) getASNURL(asn int) string {
 }
 
 func (n *NetworksDB) executeAPIASNAddrQuery(ctx context.Context, addr string) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
@@ -252,9 +264,7 @@ func (n *NetworksDB) executeAPIASNAddrQuery(ctx context.Context, addr string) {
 		return
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 3)
 	asns := n.apiOrgInfoQuery(ctx, id)
 	if len(asns) == 0 {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
@@ -268,7 +278,7 @@ func (n *NetworksDB) executeAPIASNAddrQuery(ctx context.Context, addr string) {
 	ip := net.ParseIP(addr)
 loop:
 	for _, a := range asns {
-		n.CheckRateLimit()
+		numRateLimitChecks(n, 3)
 		cidrs = n.apiNetblocksQuery(ctx, a)
 		if len(cidrs) == 0 {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
@@ -296,11 +306,10 @@ loop:
 }
 
 func (n *NetworksDB) executeAPIASNQuery(ctx context.Context, asn int, addr string, netblocks stringset.Set) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
-
 	if netblocks == nil {
 		netblocks = stringset.New()
 	}
@@ -329,9 +338,7 @@ func (n *NetworksDB) executeAPIASNQuery(ctx context.Context, asn int, addr strin
 		prefix = netblocks.Slice()[0]
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 3)
 	req := n.apiASNInfoQuery(ctx, asn)
 	if req == nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
@@ -349,18 +356,16 @@ func (n *NetworksDB) executeAPIASNQuery(ctx context.Context, asn int, addr strin
 }
 
 func (n *NetworksDB) apiIPQuery(ctx context.Context, addr string) (string, string) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return "", ""
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 3)
 	u := n.getAPIIPURL()
 	params := url.Values{"ip": {addr}}
 	body := strings.NewReader(params.Encode())
-	page, err := http.RequestWebPage(u, body, n.getHeaders(), "", "")
+	page, err := http.RequestWebPage(ctx, u, body, n.getHeaders(), nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 		return "", ""
@@ -399,18 +404,16 @@ func (n *NetworksDB) getAPIIPURL() string {
 }
 
 func (n *NetworksDB) apiOrgInfoQuery(ctx context.Context, id string) []int {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return []int{}
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 3)
 	u := n.getAPIOrgInfoURL()
 	params := url.Values{"id": {id}}
 	body := strings.NewReader(params.Encode())
-	page, err := http.RequestWebPage(u, body, n.getHeaders(), "", "")
+	page, err := http.RequestWebPage(ctx, u, body, n.getHeaders(), nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 		return []int{}
@@ -444,18 +447,16 @@ func (n *NetworksDB) getAPIOrgInfoURL() string {
 }
 
 func (n *NetworksDB) apiASNInfoQuery(ctx context.Context, asn int) *requests.ASNRequest {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return nil
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 3)
 	u := n.getAPIASNInfoURL()
 	params := url.Values{"asn": {strconv.Itoa(asn)}}
 	body := strings.NewReader(params.Encode())
-	page, err := http.RequestWebPage(u, body, n.getHeaders(), "", "")
+	page, err := http.RequestWebPage(ctx, u, body, n.getHeaders(), nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 		return nil
@@ -501,18 +502,16 @@ func (n *NetworksDB) getAPIASNInfoURL() string {
 func (n *NetworksDB) apiNetblocksQuery(ctx context.Context, asn int) stringset.Set {
 	netblocks := stringset.New()
 
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return netblocks
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 3)
 	u := n.getAPINetblocksURL()
 	params := url.Values{"asn": {strconv.Itoa(asn)}}
 	body := strings.NewReader(params.Encode())
-	page, err := http.RequestWebPage(u, body, n.getHeaders(), "", "")
+	page, err := http.RequestWebPage(ctx, u, body, n.getHeaders(), nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 		return netblocks
@@ -559,22 +558,18 @@ func (n *NetworksDB) getHeaders() map[string]string {
 	}
 }
 
-// OnWhoisRequest implements the Service interface.
-func (n *NetworksDB) OnWhoisRequest(ctx context.Context, req *requests.WhoisRequest) {
-	cfg, bus, err := ContextConfigBus(ctx)
+func (n *NetworksDB) whoisRequest(ctx context.Context, req *requests.WhoisRequest) {
+	cfg, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
-
 	if !cfg.IsDomainInScope(req.Domain) {
 		return
 	}
 
-	n.CheckRateLimit()
-	bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+	numRateLimitChecks(n, 2)
 	u := n.getDomainToIPURL(req.Domain)
-	page, err := http.RequestWebPage(u, nil, nil, "", "")
+	page, err := http.RequestWebPage(ctx, u, nil, nil, nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 		return
@@ -595,11 +590,9 @@ func (n *NetworksDB) OnWhoisRequest(ctx context.Context, req *requests.WhoisRequ
 			continue
 		}
 
-		n.CheckRateLimit()
-		bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+		numRateLimitChecks(n, 3)
 		u = networksdbBaseURL + match[1]
-		page, err = http.RequestWebPage(u, nil, nil, "", "")
+		page, err = http.RequestWebPage(ctx, u, nil, nil, nil)
 		if err != nil {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 			continue
@@ -618,13 +611,11 @@ func (n *NetworksDB) OnWhoisRequest(ctx context.Context, req *requests.WhoisRequ
 			continue
 		}
 
-		n.CheckRateLimit()
-		bus.Publish(requests.SetActiveTopic, eventbus.PriorityCritical, n.String())
-
+		numRateLimitChecks(n, 3)
 		first, last := amassnet.FirstLast(cidr)
 		u := n.getDomainsInNetworkURL(first.String(), last.String())
 
-		page, err = http.RequestWebPage(u, nil, nil, "", "")
+		page, err = http.RequestWebPage(ctx, u, nil, nil, nil)
 		if err != nil {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", n.String(), u, err))
 			continue

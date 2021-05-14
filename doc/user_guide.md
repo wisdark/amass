@@ -84,7 +84,7 @@ The intel subcommand can help you discover additional root domain names associat
 | -noresolvscore | Disable resolver reliability scoring | amass intel -cidr 104.154.0.0/15 -noresolvscore |
 | -o | Path to the text output file | amass intel -o out.txt -whois -d example.com |
 | -org | Search string provided against AS description information | amass intel -org Facebook |
-| -p | Ports separated by commas (default: 443) | amass intel -cidr 104.154.0.0/15 -p 443,8080 |
+| -p | Ports separated by commas (default: 80, 443) | amass intel -cidr 104.154.0.0/15 -p 443,8080 |
 | -r | IP addresses of preferred DNS resolvers (can be used multiple times) | amass intel -r 8.8.8.8,1.1.1.1 -whois -d example.com |
 | -rf | Path to a file providing preferred DNS resolvers | amass intel -rf data/resolvers.txt -whois -d example.com |
 | -src | Print data sources for the discovered names | amass intel -src -whois -d example.com |
@@ -107,7 +107,6 @@ This subcommand will perform DNS enumeration and network mapping while populatin
 | -demo | Censor output to make it suitable for demonstrations | amass enum -demo -d example.com |
 | -df | Path to a file providing root domain names | amass enum -df domains.txt |
 | -dir | Path to the directory containing the graph database | amass enum -dir PATH -d example.com |
-| -do | Path to data operations output file | amass enum -do data.json -d example.com |
 | -ef | Path to a file providing data sources to exclude | amass enum -ef exclude.txt -d example.com |
 | -exclude | Data source names separated by commas to be excluded | amass enum -exclude crtsh -d example.com |
 | -if | Path to a file providing data sources to include | amass enum -if include.txt -d example.com |

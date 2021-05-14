@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package main
@@ -10,14 +10,17 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
+	"strconv"
 
 	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/datasrcs"
 	"github.com/OWASP/Amass/v3/format"
-	"github.com/OWASP/Amass/v3/graph"
-	"github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/stringset"
+	"github.com/OWASP/Amass/v3/systems"
+	"github.com/caffix/netmap"
+	"github.com/caffix/stringset"
 	"github.com/fatih/color"
 )
 
@@ -122,6 +125,12 @@ func runDBCommand(clArgs []string) {
 		os.Exit(1)
 	}
 
+	srcs := datasrcs.GetAllSources(&systems.LocalSystem{Cfg: cfg})
+	initializeSourceTags(srcs)
+	for _, src := range srcs {
+		_ = src.Stop()
+	}
+
 	db := openGraphDatabase(args.Filepaths.Directory, cfg)
 	if db == nil {
 		r.Fprintln(color.Error, "Failed to connect with the database")
@@ -174,7 +183,7 @@ func runDBCommand(clArgs []string) {
 	showEventData(&args, uuids, asninfo, memDB)
 }
 
-func listEvents(uuids []string, db *graph.Graph) {
+func listEvents(uuids []string, db *netmap.Graph) {
 	events, earliest, latest := orderedEvents(uuids, db)
 	// Check if the user has requested the list of enumerations
 	for pos, idx := 0, len(events)-1; idx >= 0; idx-- {
@@ -195,7 +204,7 @@ func listEvents(uuids []string, db *graph.Graph) {
 	}
 }
 
-func showEventData(args *dbArgs, uuids []string, asninfo bool, db *graph.Graph) {
+func showEventData(args *dbArgs, uuids []string, asninfo bool, db *netmap.Graph) {
 	var total int
 	var err error
 	var outfile *os.File
@@ -209,17 +218,20 @@ func showEventData(args *dbArgs, uuids []string, asninfo bool, db *graph.Graph) 
 			os.Exit(1)
 		}
 		defer func() {
-			outfile.Sync()
-			outfile.Close()
+			_ = outfile.Sync()
+			_ = outfile.Close()
 		}()
-		outfile.Truncate(0)
-		outfile.Seek(0, 0)
+		_ = outfile.Truncate(0)
+		_, _ = outfile.Seek(0, 0)
 	}
 
-	var cache *net.ASNCache
+	var cache *requests.ASNCache
 	if asninfo {
-		cache = net.NewASNCache()
-		db.ASNCacheFill(cache)
+		cache = requests.NewASNCache()
+		if err := fillCache(cache, db); err != nil {
+			r.Println("Failed to populate the ASN cache")
+			return
+		}
 	}
 
 	tags := make(map[string]int)
@@ -300,7 +312,7 @@ type jsonOutput struct {
 	Domains []*jsonDomain `json:"domains"`
 }
 
-func writeJSON(args *dbArgs, uuids []string, assets []*requests.Output, db *graph.Graph) {
+func writeJSON(args *dbArgs, uuids []string, assets []*requests.Output, db *netmap.Graph) {
 	var output jsonOutput
 
 	// Add the event data to the JSON
@@ -340,9 +352,49 @@ func writeJSON(args *dbArgs, uuids []string, assets []*requests.Output, db *grap
 		return
 	}
 	// Remove previously stored data and encode the JSON
-	jsonptr.Truncate(0)
-	jsonptr.Seek(0, 0)
-	json.NewEncoder(jsonptr).Encode(output)
-	jsonptr.Sync()
-	jsonptr.Close()
+	_ = jsonptr.Truncate(0)
+	_, _ = jsonptr.Seek(0, 0)
+	_ = json.NewEncoder(jsonptr).Encode(output)
+	_ = jsonptr.Sync()
+	_ = jsonptr.Close()
+}
+
+func fillCache(cache *requests.ASNCache, db *netmap.Graph) error {
+	aslist, err := db.AllNodesOfType(netmap.TypeAS)
+	if err != nil {
+		return err
+	}
+
+	for _, as := range aslist {
+		asn, err := strconv.Atoi(as.(string))
+		if err != nil {
+			continue
+		}
+
+		desc := db.ReadASDescription(asn)
+		if desc == "" {
+			continue
+		}
+
+		for _, prefix := range db.ReadASPrefixes(asn) {
+			first, cidr, err := net.ParseCIDR(prefix)
+			if err != nil {
+				continue
+			}
+			if ones, _ := cidr.Mask.Size(); ones == 0 {
+				continue
+			}
+
+			cache.Update(&requests.ASNRequest{
+				Address:     first.String(),
+				ASN:         asn,
+				Prefix:      cidr.String(),
+				Description: desc,
+				Tag:         requests.RIR,
+				Source:      "RIR",
+			})
+		}
+	}
+
+	return nil
 }

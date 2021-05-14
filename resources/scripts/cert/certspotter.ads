@@ -1,4 +1,4 @@
--- Copyright 2017 Jeff Foley. All rights reserved.
+-- Copyright 2017-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 local url = require("url")
@@ -8,11 +8,12 @@ name = "CertSpotter"
 type = "cert"
 
 function start()
-    setratelimit(2)
+    setratelimit(1)
 end
 
 function vertical(ctx, domain)
-    local page, err = request({['url']=buildurl(domain)})
+    local vurl = newapiurl(domain)
+    local page, err = request(ctx, {['url']=vurl})
     if (err ~= nil and err ~= "") then
         return
     end
@@ -29,7 +30,7 @@ function vertical(ctx, domain)
     end
 end
 
-function buildurl(domain)
+function newapiurl(domain)
     local params = {
         ['domain']=domain,
         ['include_subdomains']="true",
@@ -46,7 +47,11 @@ function sendnames(ctx, content)
         return
     end
 
+    local found = {}
     for i, v in pairs(names) do
-        newname(ctx, v)
+        if found[v] == nil then
+            newname(ctx, v)
+            found[v] = true
+        end
     end
 end

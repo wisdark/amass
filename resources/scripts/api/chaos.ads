@@ -1,4 +1,4 @@
--- Copyright 2017 Jeff Foley. All rights reserved.
+-- Copyright 2017-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 local json = require("json")
@@ -24,39 +24,18 @@ function check()
 end
 
 function vertical(ctx, domain)
-    if check() then
-        apiquery(ctx, domain)
-    end
-end
-
-function apiquery(ctx, domain)
     local c
     local cfg = datasrc_config()
     if cfg ~= nil then
         c = cfg.credentials
     end
 
-    local resp
-    local vurl = apiurl(domain)
-    -- Check if the response data is in the graph database
-    if (cfg.ttl ~= nil and cfg.ttl > 0) then
-        resp = obtain_response(domain, cfg.ttl)
-    end
-
-    if (resp == nil or resp == "") then
-        local err
-
-        resp, err = request({
-            url=vurl,
-            headers={['Authorization']=c["key"]},
-        })
-        if (err ~= nil and err ~= "") then
-            return
-        end
-
-        if (cfg.ttl ~= nil and cfg.ttl > 0) then
-            cache_response(domain, resp)
-        end
+    local resp, err = request(ctx, {
+        ['url']=apiurl(domain),
+        headers={['Authorization']=c["key"]},
+    })
+    if (err ~= nil and err ~= "") then
+        return
     end
 
     local d = json.decode(resp)

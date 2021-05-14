@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package main
@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,11 +27,11 @@ import (
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/datasrcs"
 	"github.com/OWASP/Amass/v3/enum"
+	"github.com/OWASP/Amass/v3/filter"
 	"github.com/OWASP/Amass/v3/format"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/stringfilter"
-	"github.com/OWASP/Amass/v3/stringset"
 	"github.com/OWASP/Amass/v3/systems"
+	"github.com/caffix/stringset"
 	"github.com/fatih/color"
 )
 
@@ -104,8 +105,8 @@ func defineEnumArgumentFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.Var(&args.Included, "include", "Data source names separated by commas to be included")
 	enumFlags.StringVar(&args.Interface, "iface", "", "Provide the network interface to send traffic through")
 	enumFlags.IntVar(&args.MaxDNSQueries, "max-dns-queries", 0, "Maximum number of DNS queries per second")
-	enumFlags.IntVar(&args.MinForRecursive, "min-for-recursive", 1, "Subdomain labels seen before recursive brute forcing")
-	enumFlags.Var(&args.Ports, "p", "Ports separated by commas (default: 443)")
+	enumFlags.IntVar(&args.MinForRecursive, "min-for-recursive", 1, "Subdomain labels seen before recursive brute forcing (Default: 1)")
+	enumFlags.Var(&args.Ports, "p", "Ports separated by commas (default: 80, 443)")
 	enumFlags.Var(&args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
 	enumFlags.IntVar(&args.Timeout, "timeout", 0, "Number of minutes to let enumeration run before quitting")
 }
@@ -133,7 +134,7 @@ func defineEnumFilepathFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.StringVar(&args.Filepaths.AllFilePrefix, "oA", "", "Path prefix used for naming all output files")
 	enumFlags.Var(&args.Filepaths.AltWordlist, "aw", "Path to a different wordlist file for alterations")
 	enumFlags.StringVar(&args.Filepaths.Blacklist, "blf", "", "Path to a file providing blacklisted subdomains")
-	enumFlags.Var(&args.Filepaths.BruteWordlist, "w", "Path to a different wordlist file")
+	enumFlags.Var(&args.Filepaths.BruteWordlist, "w", "Path to a different wordlist file for brute forcing")
 	enumFlags.StringVar(&args.Filepaths.ConfigFile, "config", "", "Path to the INI configuration file. Additional details below")
 	enumFlags.StringVar(&args.Filepaths.Directory, "dir", "", "Path to the directory containing the output files")
 	enumFlags.Var(&args.Filepaths.Domains, "df", "Path to a file providing root domain names")
@@ -175,9 +176,11 @@ func runEnumCommand(clArgs []string) {
 		r.Fprintf(color.Error, "%v\n", err)
 		os.Exit(1)
 	}
-	defer sys.Shutdown()
-	sys.SetDataSources(datasrcs.GetAllSources(sys, true))
+	defer func() { _ = sys.Shutdown() }()
+	sys.SetDataSources(datasrcs.GetAllSources(sys))
+
 	// Expand data source category names into the associated source names
+	initializeSourceTags(sys.DataSources())
 	cfg.SourceFilter.Sources = expandCategoryNames(cfg.SourceFilter.Sources, generateCategoryMap(sys))
 
 	// Setup the new enumeration
@@ -211,16 +214,37 @@ func runEnumCommand(clArgs []string) {
 	go saveJSONOutput(e, args, jsonOutChan, &wg)
 	outChans = append(outChans, jsonOutChan)
 
-	wg.Add(1)
-	go processOutput(e, outChans, done, &wg)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if args.Timeout == 0 {
+		ctx, cancel = context.WithCancel(context.Background())
+	} else {
+		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(args.Timeout)*time.Minute)
+	}
+	defer cancel()
 
-	go signalHandler(e)
+	wg.Add(1)
+	go processOutput(ctx, e, outChans, done, &wg)
+
+	// Monitor for cancellation by the user
+	go func() {
+		quit := make(chan os.Signal, 1)
+		signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+		select {
+		case <-quit:
+			cancel()
+		case <-done:
+		case <-ctx.Done():
+		}
+	}()
+
 	// Start the enumeration process
-	if err := e.Start(); err != nil {
+	if err := e.Start(ctx); err != nil {
 		r.Println(err)
 		os.Exit(1)
 	}
-	// Let all the goroutines know that the enumeration has finished
+	// Let all the output goroutines know that the enumeration has finished
 	close(done)
 	wg.Wait()
 
@@ -271,7 +295,6 @@ func argsAndConfig(clArgs []string) (*config.Config, *enumArgs) {
 		commandUsage(enumUsageMsg, enumCommand, enumBuf)
 		return nil, &args
 	}
-
 	if err := enumCommand.Parse(clArgs); err != nil {
 		r.Fprintf(color.Error, "%v\n", err)
 		os.Exit(1)
@@ -327,13 +350,11 @@ func argsAndConfig(clArgs []string) (*config.Config, *enumArgs) {
 		r.Fprintf(color.Error, "Failed to load the configuration file: %v\n", err)
 		os.Exit(1)
 	}
-
 	// Override configuration file settings with command-line arguments
 	if err := cfg.UpdateConfig(args); err != nil {
 		r.Fprintf(color.Error, "Configuration error: %v\n", err)
 		os.Exit(1)
 	}
-
 	// Check if the user has requested the data source names
 	if args.Options.ListSources {
 		for _, line := range GetAllSourceInfo(cfg) {
@@ -341,17 +362,19 @@ func argsAndConfig(clArgs []string) (*config.Config, *enumArgs) {
 		}
 		return nil, &args
 	}
-
 	// Some input validation
 	if cfg.Passive && (args.Options.IPs || args.Options.IPv4 || args.Options.IPv6) {
 		r.Fprintln(color.Error, "IP addresses cannot be provided without DNS resolution")
+		os.Exit(1)
+	}
+	if !cfg.Active && len(args.Ports) > 0 {
+		r.Fprintln(color.Error, "Ports can only be scanned in the active mode")
 		os.Exit(1)
 	}
 	if len(cfg.Domains()) == 0 {
 		r.Fprintln(color.Error, "Configuration error: No root domain names were provided")
 		os.Exit(1)
 	}
-
 	return cfg, &args
 }
 
@@ -410,12 +433,12 @@ func saveTextOutput(e *enum.Enumeration, args *enumArgs, output chan *requests.O
 		os.Exit(1)
 	}
 	defer func() {
-		outptr.Sync()
-		outptr.Close()
+		_ = outptr.Sync()
+		_ = outptr.Close()
 	}()
 
-	outptr.Truncate(0)
-	outptr.Seek(0, 0)
+	_ = outptr.Truncate(0)
+	_, _ = outptr.Seek(0, 0)
 	// Save all the output returned by the enumeration
 	for out := range output {
 		out.Addresses = format.DesiredAddrTypes(out.Addresses, args.Options.IPv4, args.Options.IPv6)
@@ -428,7 +451,6 @@ func saveTextOutput(e *enum.Enumeration, args *enumArgs, output chan *requests.O
 		if ips != "" {
 			ips = " " + ips
 		}
-
 		// Write the line to the output file
 		fmt.Fprintf(outptr, "%s%s%s\n", source, name, ips)
 	}
@@ -445,7 +467,6 @@ func saveJSONOutput(e *enum.Enumeration, args *enumArgs, output chan *requests.O
 	if args.Filepaths.AllFilePrefix != "" {
 		jsonfile = args.Filepaths.AllFilePrefix + ".json"
 	}
-
 	if jsonfile == "" {
 		return
 	}
@@ -456,29 +477,35 @@ func saveJSONOutput(e *enum.Enumeration, args *enumArgs, output chan *requests.O
 		os.Exit(1)
 	}
 	defer func() {
-		jsonptr.Sync()
-		jsonptr.Close()
+		_ = jsonptr.Sync()
+		_ = jsonptr.Close()
 	}()
 
-	jsonptr.Truncate(0)
-	jsonptr.Seek(0, 0)
+	_ = jsonptr.Truncate(0)
+	_, _ = jsonptr.Seek(0, 0)
 
 	enc := json.NewEncoder(jsonptr)
 	// Save all the output returned by the enumeration
 	for out := range output {
 		// Handle encoding the result as JSON
-		enc.Encode(out)
+		_ = enc.Encode(out)
 	}
 }
 
-func processOutput(e *enum.Enumeration, outputs []chan *requests.Output, done chan struct{}, wg *sync.WaitGroup) {
+func processOutput(ctx context.Context, e *enum.Enumeration, outputs []chan *requests.Output, done chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer func() {
+		// Signal all the other output goroutines to terminate
+		for _, ch := range outputs {
+			close(ch)
+		}
+	}()
 
 	// This filter ensures that we only get new names
-	known := stringfilter.NewBloomFilter(1 << 22)
+	known := filter.NewBloomFilter(1 << 22)
 	// The function that obtains output from the enum and puts it on the channel
 	extract := func() {
-		for _, o := range e.ExtractOutput(known, true) {
+		for _, o := range ExtractOutput(e, known, true) {
 			if !e.Config.IsDomainInScope(o.Name) {
 				continue
 			}
@@ -489,53 +516,26 @@ func processOutput(e *enum.Enumeration, outputs []chan *requests.Output, done ch
 		}
 	}
 
-	t := time.NewTimer(15 * time.Second)
-loop:
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-done:
-			break loop
-		case <-t.C:
-			started := time.Now()
+			// Check one last time
 			extract()
-			next := time.Since(started) * 5
-			if next < 3*time.Second {
-				next = 3 * time.Second
-			} else if next > 10*time.Second {
-				next = 10 * time.Second
-			}
-			t.Reset(next)
+			return
+		case <-t.C:
+			extract()
 		}
 	}
-
-	// Check one last time
-	extract()
-	// Signal all the other goroutines to terminate
-	for _, ch := range outputs {
-		close(ch)
-	}
-}
-
-// If the user interrupts the program, print the summary information
-func signalHandler(e *enum.Enumeration) {
-	quit := make(chan os.Signal, 1)
-
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-	// Signal the enumeration to finish
-	e.Done()
-	// Wait for output operations to complete
-	time.Sleep(30 * time.Second)
-	os.Exit(1)
 }
 
 func writeLogsAndMessages(logs *io.PipeReader, logfile string, verbose bool) {
 	wildcard := regexp.MustCompile("DNS wildcard")
 	avg := regexp.MustCompile("Average DNS queries")
 	rScore := regexp.MustCompile("Resolver .* has a low score")
-	alterations := regexp.MustCompile("queries for altered names")
-	brute := regexp.MustCompile("queries for brute forcing")
-	sanity := regexp.MustCompile("SanityChecks")
 	queries := regexp.MustCompile("Querying")
 
 	var filePtr *os.File
@@ -547,11 +547,11 @@ func writeLogsAndMessages(logs *io.PipeReader, logfile string, verbose bool) {
 			r.Fprintf(color.Error, "Failed to open the log file: %v\n", err)
 		} else {
 			defer func() {
-				filePtr.Sync()
-				filePtr.Close()
+				_ = filePtr.Sync()
+				_ = filePtr.Close()
 			}()
-			filePtr.Truncate(0)
-			filePtr.Seek(0, 0)
+			_ = filePtr.Truncate(0)
+			_, _ = filePtr.Seek(0, 0)
 		}
 	}
 
@@ -577,24 +577,12 @@ func writeLogsAndMessages(logs *io.PipeReader, logfile string, verbose bool) {
 		if rScore.FindString(line) != "" {
 			fgR.Fprintln(color.Error, line)
 		}
-		// Let the user know when brute forcing has started
-		if brute.FindString(line) != "" {
-			fgY.Fprintln(color.Error, line)
-		}
-		// Let the user know when name alterations have started
-		if alterations.FindString(line) != "" {
-			fgY.Fprintln(color.Error, line)
-		}
-		// Check if DNS resolvers have failed the sanity checks
-		if verbose && sanity.FindString(line) != "" {
-			fgR.Fprintln(color.Error, line)
-		}
 		// Check for Amass DNS wildcard messages
 		if verbose && wildcard.FindString(line) != "" {
 			fgR.Fprintln(color.Error, line)
 		}
 		// Let the user know when data sources are being queried
-		if queries.FindString(line) != "" {
+		if verbose && queries.FindString(line) != "" {
 			fgY.Fprintln(color.Error, line)
 		}
 	}
@@ -608,7 +596,6 @@ func processEnumInputFiles(args *enumArgs) error {
 			if err != nil {
 				return fmt.Errorf("Failed to parse the brute force wordlist file: %v", err)
 			}
-
 			args.BruteWordList.InsertMany(list...)
 		}
 	}
@@ -618,7 +605,6 @@ func processEnumInputFiles(args *enumArgs) error {
 			if err != nil {
 				return fmt.Errorf("Failed to parse the alterations wordlist file: %v", err)
 			}
-
 			args.AltWordList.InsertMany(list...)
 		}
 	}
@@ -649,7 +635,6 @@ func processEnumInputFiles(args *enumArgs) error {
 			if err != nil {
 				return fmt.Errorf("Failed to parse the subdomain names file: %v", err)
 			}
-
 			args.Names.InsertMany(list...)
 		}
 	}
@@ -659,7 +644,6 @@ func processEnumInputFiles(args *enumArgs) error {
 			if err != nil {
 				return fmt.Errorf("Failed to parse the domain names file: %v", err)
 			}
-
 			args.Domains.InsertMany(list...)
 		}
 	}
@@ -669,7 +653,6 @@ func processEnumInputFiles(args *enumArgs) error {
 			if err != nil {
 				return fmt.Errorf("Failed to parse the esolver file: %v", err)
 			}
-
 			args.Resolvers.InsertMany(list...)
 		}
 	}
@@ -729,9 +712,6 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 	if e.Blacklist.Len() > 0 {
 		conf.Blacklist = e.Blacklist.Slice()
 	}
-	if e.Timeout > 0 {
-		conf.Timeout = e.Timeout
-	}
 	if e.Options.Verbose {
 		conf.Verbose = true
 	}
@@ -755,8 +735,15 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 			e.Included.Insert(requests.BRUTE)
 		}
 		conf.SourceFilter.Sources = e.Included.Slice()
-	} else if len(e.Excluded) > 0 {
+	} else if len(e.Excluded) > 0 || conf.Alterations || conf.BruteForcing {
 		conf.SourceFilter.Include = false
+		// Check if brute forcing and alterations should be added
+		if conf.Alterations {
+			e.Included.Insert(requests.ALT)
+		}
+		if conf.BruteForcing {
+			e.Included.Insert(requests.BRUTE)
+		}
 		conf.SourceFilter.Sources = e.Excluded.Slice()
 	}
 	// Attempt to add the provided domains to the configuration

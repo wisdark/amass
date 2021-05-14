@@ -1,10 +1,14 @@
--- Copyright 2017 Jeff Foley. All rights reserved.
+-- Copyright 2017-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 name = "Alterations"
 type = "alt"
 
 ldh_chars = "_abcdefghijklmnopqrstuvwxyz0123456789-"
+
+function start()
+    setratelimit(1)
+end
 
 function resolved(ctx, name, domain, records)
     local nparts = split(name, ".")
@@ -27,32 +31,50 @@ function makenames(ctx, cfg, name)
 
     if cfg['flip_words'] then
         for i, n in pairs(flip_words(name, words)) do
-            sendnames(ctx, n)
+            local expired = sendnames(ctx, n)
+            if expired then
+                return
+            end
         end
     end
     if cfg['flip_numbers'] then
         for i, n in pairs(flip_numbers(name)) do
-            sendnames(ctx, n)
+            local expired = sendnames(ctx, n)
+            if expired then
+                return
+            end
         end
     end
     if cfg['add_numbers'] then
         for i, n in pairs(append_numbers(name)) do
-            sendnames(ctx, n)
+            local expired = sendnames(ctx, n)
+            if expired then
+                return
+            end
         end
     end
     if cfg['add_words'] then
         for i, n in pairs(add_prefix_word(name, words)) do
-            sendnames(ctx, n)
+            local expired = sendnames(ctx, n)
+            if expired then
+                return
+            end
         end
         for i, n in pairs(add_suffix_word(name, words)) do
-            sendnames(ctx, n)
+            local expired = sendnames(ctx, n)
+            if expired then
+                return
+            end
         end
     end
 
     local distance = cfg['edit_distance']
     if distance > 0 then
         for i, n in pairs(fuzzy_label_searches(name, distance)) do
-            sendnames(ctx, n)
+            local expired = sendnames(ctx, n)
+            if expired then
+                return
+            end
         end
     end
 end
@@ -334,10 +356,19 @@ end
 function sendnames(ctx, content)
     local names = find(content, subdomainre)
     if names == nil then
-        return
+        return false
     end
 
+    local found = {}
     for i, v in pairs(names) do
-        newname(ctx, v)
+        if found[v] == nil then
+            local expired = newname(ctx, v)
+            if expired then
+                return expired
+            end
+            found[v] = true
+        end
     end
+
+    return false
 end

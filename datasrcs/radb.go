@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package datasrcs
@@ -12,13 +12,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OWASP/Amass/v3/eventbus"
 	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/net/http"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/resolvers"
-	"github.com/OWASP/Amass/v3/stringset"
 	"github.com/OWASP/Amass/v3/systems"
+	"github.com/caffix/eventbus"
+	"github.com/caffix/resolve"
+	"github.com/caffix/service"
+	"github.com/caffix/stringset"
+	"github.com/miekg/dns"
 )
 
 const (
@@ -28,7 +30,7 @@ const (
 
 // RADb is the Service that handles access to the RADb data source.
 type RADb struct {
-	requests.BaseService
+	service.BaseService
 
 	SourceType string
 	sys        systems.System
@@ -42,28 +44,29 @@ func NewRADb(sys systems.System) *RADb {
 		sys:        sys,
 	}
 
-	r.BaseService = *requests.NewBaseService(r, "RADb")
+	r.BaseService = *service.NewBaseService(r, "RADb")
 	return r
 }
 
-// Type implements the Service interface.
-func (r *RADb) Type() string {
+// Description implements the Service interface.
+func (r *RADb) Description() string {
 	return r.SourceType
 }
 
 // OnStart implements the Service interface.
 func (r *RADb) OnStart() error {
-	r.BaseService.OnStart()
-
-	if answers, err := r.sys.Pool().Resolve(context.TODO(),
-		radbWhoisURL, "A", resolvers.PriorityCritical, resolvers.RetryPolicy); err == nil {
-		ip := answers[0].Data
-		if ip != "" {
-			r.addr = ip
+	msg := resolve.QueryMsg(radbWhoisURL, dns.TypeA)
+	if resp, err := r.sys.Pool().Query(context.TODO(),
+		msg, resolve.PriorityCritical, resolve.RetryPolicy); err == nil {
+		if ans := resolve.ExtractAnswers(resp); len(ans) > 0 {
+			ip := ans[0].Data
+			if ip != "" {
+				r.addr = ip
+			}
 		}
 	}
 
-	r.SetRateLimit(2 * time.Second)
+	r.SetRateLimit(1)
 	return nil
 }
 
@@ -85,8 +88,15 @@ func (r *RADb) registryRADbURL(registry string) string {
 	return url
 }
 
-// OnASNRequest implements the Service interface.
-func (r *RADb) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
+// OnRequest implements the Service interface.
+func (r *RADb) OnRequest(ctx context.Context, args service.Args) {
+	if req, ok := args.(*requests.ASNRequest); ok {
+		r.asnRequest(ctx, req)
+		r.CheckRateLimit()
+	}
+}
+
+func (r *RADb) asnRequest(ctx context.Context, req *requests.ASNRequest) {
 	if req.Address == "" && req.ASN == 0 {
 		return
 	}
@@ -101,14 +111,14 @@ func (r *RADb) OnASNRequest(ctx context.Context, req *requests.ASNRequest) {
 }
 
 func (r *RADb) executeASNAddrQuery(ctx context.Context, addr string) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
 
 	url := r.getIPURL("arin", addr)
 	headers := map[string]string{"Content-Type": "application/json"}
-	page, err := http.RequestWebPage(url, nil, headers, "", "")
+	page, err := http.RequestWebPage(ctx, url, nil, headers, nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", r.String(), url, err))
 		return
@@ -146,7 +156,6 @@ func (r *RADb) executeASNAddrQuery(ctx context.Context, addr string) {
 
 	cidr := prefix + "/" + strconv.Itoa(m.CIDRs[0].Length)
 	if asn := r.ipToASN(ctx, cidr); asn != 0 {
-		r.CheckRateLimit()
 		r.executeASNQuery(ctx, asn, addr, cidr)
 	}
 }
@@ -158,7 +167,7 @@ func (r *RADb) getIPURL(registry, addr string) string {
 }
 
 func (r *RADb) executeASNQuery(ctx context.Context, asn int, addr, prefix string) {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return
 	}
@@ -167,9 +176,10 @@ func (r *RADb) executeASNQuery(ctx context.Context, asn int, addr, prefix string
 		return
 	}
 
+	numRateLimitChecks(r, 2)
 	url := r.getASNURL("arin", strconv.Itoa(asn))
 	headers := map[string]string{"Content-Type": "application/json"}
-	page, err := http.RequestWebPage(url, nil, headers, "", "")
+	page, err := http.RequestWebPage(ctx, url, nil, headers, nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", r.String(), url, err))
 		return
@@ -209,7 +219,7 @@ func (r *RADb) executeASNQuery(ctx context.Context, asn int, addr, prefix string
 		}
 	}
 
-	r.CheckRateLimit()
+	numRateLimitChecks(r, 2)
 	blocks := stringset.New()
 	if prefix != "" {
 		blocks.Insert(prefix)
@@ -244,15 +254,15 @@ func (r *RADb) getASNURL(registry, asn string) string {
 func (r *RADb) netblocks(ctx context.Context, asn int) stringset.Set {
 	netblocks := stringset.New()
 
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return netblocks
 	}
 
-	r.CheckRateLimit()
+	numRateLimitChecks(r, 2)
 	url := r.getNetblocksURL(strconv.Itoa(asn))
 	headers := map[string]string{"Content-Type": "application/json"}
-	page, err := http.RequestWebPage(url, nil, headers, "", "")
+	page, err := http.RequestWebPage(ctx, url, nil, headers, nil)
 	if err != nil {
 		bus.Publish(requests.LogTopic, eventbus.PriorityHigh, fmt.Sprintf("%s: %s: %v", r.String(), url, err))
 		return netblocks
@@ -312,22 +322,27 @@ func (r *RADb) getNetblocksURL(asn string) string {
 }
 
 func (r *RADb) ipToASN(ctx context.Context, cidr string) int {
-	_, bus, err := ContextConfigBus(ctx)
+	_, bus, err := requests.ContextConfigBus(ctx)
 	if err != nil {
 		return 0
 	}
 
-	r.CheckRateLimit()
+	numRateLimitChecks(r, 2)
 	if r.addr == "" {
-		answers, err := r.sys.Pool().Resolve(ctx, radbWhoisURL,
-			"A", resolvers.PriorityHigh, resolvers.RetryPolicy)
+		msg := resolve.QueryMsg(radbWhoisURL, dns.TypeA)
+		resp, err := r.sys.Pool().Query(ctx, msg, resolve.PriorityHigh, resolve.RetryPolicy)
 		if err != nil {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 				fmt.Sprintf("%s: %s: %v", r.String(), radbWhoisURL, err))
 			return 0
 		}
 
-		ip := answers[0].Data
+		ans := resolve.ExtractAnswers(resp)
+		if len(ans) == 0 {
+			return 0
+		}
+
+		ip := ans[0].Data
 		if ip == "" {
 			bus.Publish(requests.LogTopic, eventbus.PriorityHigh,
 				fmt.Sprintf("%s: Failed to resolve %s", r.String(), radbWhoisURL))

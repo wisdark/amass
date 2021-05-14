@@ -1,10 +1,11 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -20,8 +22,8 @@ import (
 	"github.com/OWASP/Amass/v3/datasrcs"
 	"github.com/OWASP/Amass/v3/format"
 	"github.com/OWASP/Amass/v3/intel"
-	"github.com/OWASP/Amass/v3/stringset"
 	"github.com/OWASP/Amass/v3/systems"
+	"github.com/caffix/stringset"
 	"github.com/fatih/color"
 )
 
@@ -74,7 +76,7 @@ func defineIntelArgumentFlags(intelFlags *flag.FlagSet, args *intelArgs) {
 	intelFlags.Var(&args.Excluded, "exclude", "Data source names separated by commas to be excluded")
 	intelFlags.Var(&args.Included, "include", "Data source names separated by commas to be included")
 	intelFlags.IntVar(&args.MaxDNSQueries, "max-dns-queries", 0, "Maximum number of concurrent DNS queries")
-	intelFlags.Var(&args.Ports, "p", "Ports separated by commas (default: 443)")
+	intelFlags.Var(&args.Ports, "p", "Ports separated by commas (default: 80, 443)")
 	intelFlags.Var(&args.Resolvers, "r", "IP addresses of preferred DNS resolvers (can be used multiple times)")
 	intelFlags.IntVar(&args.Timeout, "timeout", 0, "Number of minutes to let enumeration run before quitting")
 }
@@ -85,7 +87,7 @@ func defineIntelOptionFlags(intelFlags *flag.FlagSet, args *intelArgs) {
 	intelFlags.BoolVar(&args.Options.IPs, "ip", false, "Show the IP addresses for discovered names")
 	intelFlags.BoolVar(&args.Options.IPv4, "ipv4", false, "Show the IPv4 addresses for discovered names")
 	intelFlags.BoolVar(&args.Options.IPv6, "ipv6", false, "Show the IPv6 addresses for discovered names")
-	intelFlags.BoolVar(&args.Options.ListSources, "list", false, "Print the names of all available data sources")
+	intelFlags.BoolVar(&args.Options.ListSources, "list", false, "Print additional information")
 	intelFlags.BoolVar(&args.Options.MonitorResolverRate, "noresolvrate", true, "Disable resolver rate monitoring")
 	intelFlags.BoolVar(&args.Options.ReverseWhois, "whois", false, "All provided domains are run through reverse whois")
 	intelFlags.BoolVar(&args.Options.Sources, "src", false, "Print data sources for the discovered names")
@@ -126,7 +128,6 @@ func runIntelCommand(clArgs []string) {
 		commandUsage(intelUsageMsg, intelCommand, intelBuf)
 		return
 	}
-
 	if err := intelCommand.Parse(clArgs); err != nil {
 		r.Fprintf(color.Error, "%v\n", err)
 		os.Exit(1)
@@ -135,7 +136,6 @@ func runIntelCommand(clArgs []string) {
 		commandUsage(intelUsageMsg, intelCommand, intelBuf)
 		return
 	}
-
 	if (len(args.Excluded) > 0 || args.Filepaths.ExcludedSrcs != "") &&
 		(len(args.Included) > 0 || args.Filepaths.IncludedSrcs != "") {
 		commandUsage(intelUsageMsg, intelCommand, intelBuf)
@@ -144,19 +144,6 @@ func runIntelCommand(clArgs []string) {
 
 	// Seed the default pseudo-random number generator
 	rand.Seed(time.Now().UTC().UnixNano())
-
-	if args.OrganizationName != "" {
-		asns, descs, err := config.LookupASNsByName(args.OrganizationName)
-		if err == nil {
-			for i, a := range asns {
-				fmt.Printf("%d, %s\n", a, descs[i])
-			}
-		} else {
-			fmt.Printf("%v\n", err)
-		}
-		return
-	}
-
 	if err := processIntelInputFiles(&args); err != nil {
 		fmt.Fprintf(color.Error, "%v\n", err)
 		os.Exit(1)
@@ -180,19 +167,23 @@ func runIntelCommand(clArgs []string) {
 		os.Exit(1)
 	}
 
-	// Check if the user has requested the data source names
-	if args.Options.ListSources {
+	// Some input validation
+	if !args.Options.ReverseWhois && args.OrganizationName == "" && !args.Options.ListSources &&
+		len(args.Addresses) == 0 && len(args.CIDRs) == 0 && len(args.ASNs) == 0 {
+		commandUsage(intelUsageMsg, intelCommand, intelBuf)
+		os.Exit(1)
+	}
+	if !cfg.Active && len(args.Ports) > 0 {
+		r.Fprintln(color.Error, "Ports can only be scanned in the active mode")
+		os.Exit(1)
+	}
+
+	// Check if the user requested data source information
+	if args.Options.ListSources && len(args.ASNs) == 0 {
 		for _, info := range GetAllSourceInfo(cfg) {
 			g.Println(info)
 		}
 		return
-	}
-
-	// Some input validation
-	if !args.Options.ReverseWhois && args.OrganizationName == "" &&
-		len(args.Addresses) == 0 && len(args.CIDRs) == 0 && len(args.ASNs) == 0 {
-		commandUsage(intelUsageMsg, intelCommand, intelBuf)
-		os.Exit(1)
 	}
 
 	rLog, wLog := io.Pipe()
@@ -209,14 +200,29 @@ func runIntelCommand(clArgs []string) {
 	if err != nil {
 		return
 	}
-	sys.SetDataSources(datasrcs.GetAllSources(sys, true))
+	sys.SetDataSources(datasrcs.GetAllSources(sys))
 
-	ic := intel.NewCollection(sys)
+	if args.OrganizationName != "" {
+		asns, _, err := config.LookupASNsByName(args.OrganizationName)
+		if err != nil {
+			fmt.Printf("%v\n", err)
+		}
+		if len(asns) > 0 {
+			printNetblocks(asns, cfg, sys)
+		}
+		return
+	}
+	// Check if the user requested additional ASN & netblock information
+	if args.Options.ListSources && len(args.ASNs) > 0 {
+		printNetblocks(args.ASNs, cfg, sys)
+		return
+	}
+
+	ic := intel.NewCollection(cfg, sys)
 	if ic == nil {
 		r.Fprintf(color.Error, "%s\n", "No DNS resolvers passed the sanity check")
 		os.Exit(1)
 	}
-	ic.Config = cfg
 
 	if args.Options.ReverseWhois {
 		if len(ic.Config.Domains()) == 0 {
@@ -227,13 +233,48 @@ func runIntelCommand(clArgs []string) {
 		args.Options.IPs = false
 		args.Options.IPv4 = false
 		args.Options.IPv6 = false
-		go ic.ReverseWhois()
+		go func() { _ = ic.ReverseWhois() }()
 	} else {
-		go ic.HostedDomains()
+		var ctx context.Context
+		var cancel context.CancelFunc
+		if args.Timeout == 0 {
+			ctx, cancel = context.WithCancel(context.Background())
+		} else {
+			ctx, cancel = context.WithTimeout(context.Background(), time.Duration(args.Timeout)*time.Minute)
+		}
+		defer cancel()
+		// Monitor for cancellation by the user
+		go func() {
+			quit := make(chan os.Signal, 1)
+			signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+
+			select {
+			case <-quit:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+
+		go func() { _ = ic.HostedDomains(ctx) }()
 	}
 
-	go intelSignalHandler(ic)
 	processIntelOutput(ic, &args)
+}
+
+func printNetblocks(asns []int, cfg *config.Config, sys systems.System) {
+	for _, asn := range asns {
+		systems.PopulateCache(context.Background(), asn, sys)
+
+		d := sys.Cache().ASNSearch(asn)
+		if d == nil {
+			continue
+		}
+
+		fmt.Printf("%s%s %s %s\n", blue("ASN: "), yellow(strconv.Itoa(asn)), green("-"), green(d.Description))
+		for _, cidr := range d.Netblocks.Slice() {
+			fmt.Printf("%s\n", yellow(fmt.Sprintf("\t%s", cidr)))
+		}
+	}
 }
 
 func processIntelOutput(ic *intel.Collection, args *intelArgs) {
@@ -253,37 +294,28 @@ func processIntelOutput(ic *intel.Collection, args *intelArgs) {
 			os.Exit(1)
 		}
 		defer func() {
-			outptr.Sync()
-			outptr.Close()
+			_ = outptr.Sync()
+			_ = outptr.Close()
 		}()
-		outptr.Truncate(0)
-		outptr.Seek(0, 0)
+		_ = outptr.Truncate(0)
+		_, _ = outptr.Seek(0, 0)
 	}
 
 	// Collect all the names returned by the intelligence collection
 	for out := range ic.Output {
-		source, name, ips := format.OutputLineParts(out, args.Options.Sources,
+		source, _, ips := format.OutputLineParts(out, args.Options.Sources,
 			args.Options.IPs || args.Options.IPv4 || args.Options.IPv6, args.Options.DemoMode)
 
 		if ips != "" {
 			ips = " " + ips
 		}
 
-		fmt.Fprintf(color.Output, "%s%s%s\n", blue(source), green(name), yellow(ips))
+		fmt.Fprintf(color.Output, "%s%s%s\n", blue(source), green(out.Domain), yellow(ips))
 		// Handle writing the line to a specified output file
 		if outptr != nil {
-			fmt.Fprintf(outptr, "%s%s%s\n", source, name, ips)
+			fmt.Fprintf(outptr, "%s%s%s\n", source, out.Domain, ips)
 		}
 	}
-}
-
-// If the user interrupts the program, print the summary information
-func intelSignalHandler(ic *intel.Collection) {
-	quit := make(chan os.Signal, 1)
-
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
-	ic.Done()
 }
 
 // Obtain parameters from provided input files
@@ -344,9 +376,6 @@ func (i intelArgs) OverrideConfig(conf *config.Config) error {
 	}
 	if i.Filepaths.Directory != "" {
 		conf.Dir = i.Filepaths.Directory
-	}
-	if i.Timeout > 0 {
-		conf.Timeout = i.Timeout
 	}
 	if i.Options.Verbose {
 		conf.Verbose = true

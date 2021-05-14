@@ -1,4 +1,4 @@
-// Copyright 2017-2020 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package config
@@ -21,9 +21,7 @@ import (
 	"sync"
 
 	_ "github.com/OWASP/Amass/v3/config/statik" // The content being embedded into the binary
-	amasshttp "github.com/OWASP/Amass/v3/net/http"
-	"github.com/OWASP/Amass/v3/stringset"
-	"github.com/OWASP/Amass/v3/wordlist"
+	"github.com/caffix/stringset"
 	"github.com/go-ini/ini"
 	"github.com/google/uuid"
 	"github.com/rakyll/statik/fs"
@@ -135,9 +133,6 @@ type Config struct {
 	Resolvers           []string
 	MonitorResolverRate bool
 
-	// Enumeration Timeout
-	Timeout int
-
 	// Option for verbose logging and output
 	Verbose bool
 
@@ -156,9 +151,8 @@ func NewConfig() *Config {
 	c := &Config{
 		UUID:                uuid.New(),
 		Log:                 log.New(ioutil.Discard, "", 0),
-		Ports:               []int{443},
+		Ports:               []int{80, 443},
 		MinForRecursive:     1,
-		Resolvers:           defaultPublicResolvers,
 		MonitorResolverRate: true,
 		LocalDatabase:       true,
 		// The following is enum-only, but intel will just ignore them anyway
@@ -170,6 +164,7 @@ func NewConfig() *Config {
 		MinForWordFlip: 2,
 		EditDistance:   1,
 		Recursive:      true,
+		MinimumTTL:     1440,
 	}
 
 	c.calcDNSQueriesMax()
@@ -207,12 +202,12 @@ func (c *Config) CheckSettings() error {
 		}
 	}
 
-	c.Wordlist, err = wordlist.ExpandMaskWordlist(c.Wordlist)
+	c.Wordlist, err = ExpandMaskWordlist(c.Wordlist)
 	if err != nil {
 		return err
 	}
 
-	c.AltWordlist, err = wordlist.ExpandMaskWordlist(c.AltWordlist)
+	c.AltWordlist, err = ExpandMaskWordlist(c.AltWordlist)
 	if err != nil {
 		return err
 	}
@@ -233,8 +228,8 @@ func (c *Config) LoadSettings(path string) error {
 		return fmt.Errorf("Error mapping configuration settings to internal values: %v", err)
 	}
 	// Attempt to load a special mode of operation specified by the user
-	if cfg.Section(ini.DEFAULT_SECTION).HasKey("mode") {
-		mode := cfg.Section(ini.DEFAULT_SECTION).Key("mode").String()
+	if cfg.Section(ini.DefaultSection).HasKey("mode") {
+		mode := cfg.Section(ini.DefaultSection).Key("mode").String()
 
 		if mode == "passive" {
 			c.Passive = true
@@ -260,28 +255,21 @@ func (c *Config) LoadSettings(path string) error {
 	return nil
 }
 
-// AcquireConfig populates the Config struct provided by the config argument.
-func AcquireConfig(dir, file string, config *Config) error {
-	var err error
+// AcquireConfig populates the Config struct provided by the Config argument.
+func AcquireConfig(dir, file string, cfg *Config) error {
+	var path string
 
 	if file != "" {
-		err = config.LoadSettings(file)
-		if err == nil {
-			return nil
+		path = file
+	} else if f, set := os.LookupEnv("AMASS_CONFIG"); set {
+		path = f
+	} else if d := OutputDirectory(dir); d != "" {
+		if finfo, err := os.Stat(d); !os.IsNotExist(err) && finfo.IsDir() {
+			path = filepath.Join(d, "config.ini")
 		}
 	}
-	// Attempt to obtain the configuration file from the output directory
-	if dir = OutputDirectory(dir); dir != "" {
-		if finfo, err := os.Stat(dir); !os.IsNotExist(err) && finfo.IsDir() {
-			file := filepath.Join(dir, "config.ini")
 
-			err = config.LoadSettings(file)
-			if err == nil {
-				return nil
-			}
-		}
-	}
-	return err
+	return cfg.LoadSettings(path)
 }
 
 // OutputDirectory returns the file path of the Amass output directory. A suitable
@@ -333,14 +321,6 @@ func GetListFromFile(path string) ([]string, error) {
 
 	s, err := getWordList(reader)
 	return s, err
-}
-
-func getWordlistByURL(url string) ([]string, error) {
-	page, err := amasshttp.RequestWebPage(url, nil, nil, "", "")
-	if err != nil {
-		return nil, fmt.Errorf("Failed to obtain the wordlist at %s: %v", url, err)
-	}
-	return getWordList(strings.NewReader(page))
 }
 
 func getWordlistByFS(path string) ([]string, error) {

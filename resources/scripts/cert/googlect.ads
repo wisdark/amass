@@ -1,4 +1,4 @@
--- Copyright 2017 Jeff Foley. All rights reserved.
+-- Copyright 2017-2021 Jeff Foley. All rights reserved.
 -- Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 local url = require("url")
@@ -18,7 +18,7 @@ function vertical(ctx, domain)
     }
 
     while(true) do
-        local page, err = request({
+        local page, err = request(ctx, {
             ['url']=buildurl(domain, token),
             headers=hdrs,
         })
@@ -32,9 +32,6 @@ function vertical(ctx, domain)
         if token == "" then
             break
         end
-
-        checkratelimit()
-        active(ctx)
     end
 end
 
@@ -62,8 +59,12 @@ function sendnames(ctx, content)
         return
     end
 
+    local found = {}
     for i, v in pairs(names) do
-        newname(ctx, v)
+        if found[v] == nil then
+            newname(ctx, v)
+            found[v] = true
+        end
     end
 end
 
